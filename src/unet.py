@@ -13,32 +13,37 @@ class DownBlock(torch.nn.Module):
         use_attention
     ):
         super().__init__()
-        module_lists = []
+        layers = []
 
         for ind in range(block_depth):
+            modules = []
             in_channels = in_channels if ind == 0 else out_channels
-            module_lists.append(ResBlock(in_channels, out_channels, pos_channels))
-
+            modules.append(ResBlock(in_channels, out_channels, pos_channels))
+            
             if use_attention:
-                module_lists.append(SelfAttention(out_channels))
+                modules.append(SelfAttention(out_channels))
+                
+            layers.append(torch.nn.ModuleList(modules))
 
-        self.blocks = torch.nn.ModuleList(module_lists)
+        self.layers = torch.nn.ModuleList(layers)
         self.down_sampler = torch.nn.MaxPool2d(2)
 
     def forward(self, x, skips, timesteps):
         _, _, h, w = x.shape
         
-        for module in self.blocks:
-            if isinstance(module, ResBlock):
-                x = module(x, timesteps)
-            elif isinstance(module, SelfAttention):
-                x = rearrange(x, "b c h w -> b (h w) c")
-                x = module(x)
-                x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
-            else:
-                raise NotImplementedError
+        for modules in self.layers:
+            for module in modules:
+                if isinstance(module, ResBlock):
+                    x = module(x, timesteps)
+                elif isinstance(module, SelfAttention):
+                    x = rearrange(x, "b c h w -> b (h w) c")
+                    x = module(x)
+                    x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
+                else:
+                    raise NotImplementedError
 
-        skips.append(x)
+            skips.append(x)
+            
         return self.down_sampler(x)
 
 class UpBlock(torch.nn.Module):
@@ -51,32 +56,37 @@ class UpBlock(torch.nn.Module):
         use_attention,
     ):
         super().__init__()
-        module_lists = []
+        layers = []
 
         for ind in range(block_depth):
-            in_channels = in_channels if ind == 0 else out_channels
-            module_lists.append(ResBlock(in_channels, out_channels, pos_channels))
-
+            modules = []
+            output_channels = out_channels if ind == block_depth-1 else in_channels // 2
+            modules.append(ResBlock(in_channels, output_channels, pos_channels))
+            
             if use_attention:
-                module_lists.append(SelfAttention(out_channels))
+                modules.append(SelfAttention(output_channels))
+                
+            layers.append(torch.nn.ModuleList(modules))
 
-        self.blocks = torch.nn.ModuleList(module_lists)
+        self.layers = torch.nn.ModuleList(layers)
         self.up_sampler = torch.nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
 
     def forward(self, x, skips, timesteps):
         x = self.up_sampler(x)
-        x = torch.cat([x, skips.pop()], dim=1)
         _, _, h, w = x.shape
 
-        for module in self.blocks:
-            if isinstance(module, ResBlock):
-                x = module(x, timesteps)
-            elif isinstance(module, SelfAttention):
-                x = rearrange(x, "b c h w -> b (h w) c")
-                x = module(x)
-                x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
-            else:
-                raise NotImplementedError
+        for modules in self.layers:
+            x = torch.cat([x, skips.pop()], dim=1)
+            
+            for module in modules:
+                if isinstance(module, ResBlock):
+                    x = module(x, timesteps)
+                elif isinstance(module, SelfAttention):
+                    x = rearrange(x, "b c h w -> b (h w) c")
+                    x = module(x)
+                    x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
+                else:
+                    raise NotImplementedError
 
         return x
 
@@ -89,8 +99,8 @@ class UNet(torch.nn.Module):
         input_channels, 
         output_channels,
         device,
-        pos_channels=256,
-        max_period = 10000
+        pos_channels=512,
+        max_period=10000
     ):
         super().__init__()
         assert(len(widths) == len(attention_levels))
@@ -134,19 +144,23 @@ class UNet(torch.nn.Module):
             torch.nn.Conv2d(widths[0], output_channels, kernel_size=1)
         )
 
-    def forward(self, x, t, x_self_cond=None):
-        timesteps = positional_emb(t[:, None], self.pos_channels, self.max_period)
+    def forward(self, x, t, y=None, x_self_cond=None):
+        timesteps = positional_emb(t, self.pos_channels, self.max_period)
+        if y is None:
+            y = torch.zeros_like(timesteps)
+        emb_and_noise = timesteps + y
+        
         x = self.inc(x)
         skips = []
 
         for downblock in self.down_layers:
-            x = downblock(x, skips, timesteps)
+            x = downblock(x, skips, emb_and_noise)
 
         _, _, h, w = x.shape
 
         for bottleneck_block in self.bottleneck_layers:
             if isinstance(bottleneck_block, ResBlock):
-                x = bottleneck_block(x, timesteps)
+                x = bottleneck_block(x, emb_and_noise)
             elif isinstance(bottleneck_block, SelfAttention):
                 x = rearrange(x, "b c h w -> b (h w) c")
                 x = bottleneck_block(x)
@@ -155,7 +169,7 @@ class UNet(torch.nn.Module):
                 raise NotImplementedError
 
         for upblock in self.up_layers:
-            x = upblock(x, skips, timesteps)
+            x = upblock(x, skips, emb_and_noise)
 
         return self.out(x)
 
@@ -179,5 +193,6 @@ if __name__ == '__main__':
     
     batch_images = torch.randn([batch_size, in_channels, latent_size, latent_size]).to(device)
     t = torch.randint(low=1, high=n_noise_steps, size=(batch_size, 1)).to(device)
-    summary(model, input_data=[batch_images, t])
+    y = torch.randn([batch_size, 512]).to(device)
+    summary(model, input_data=[batch_images, t, y])
     
