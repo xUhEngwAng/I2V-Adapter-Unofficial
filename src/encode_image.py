@@ -62,5 +62,5 @@ if __name__ == '__main__':
     encoded = np.concatenate(encoded)
     print(encoded.shape)
     np.save(args.target_path, encoded)
-    print(f'Done encoding a total of {len(encoded)} videos and saving the latents to {args.target_path}.')
+    print(f'Done encoding a total of {len(encoded)} images and saving the latents to {args.target_path}.')
     

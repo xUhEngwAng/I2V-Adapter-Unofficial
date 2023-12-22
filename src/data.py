@@ -1,33 +1,53 @@
 import logging
 import numpy as np
 import torch
+import torchvision
 import random
 
 from einops import rearrange
 from pathlib import Path
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def obtain_dataloader(batch_size, dataset_path):
+    transforms = torchvision.transforms.Compose([
+        torchvision.transforms.ToTensor(),
+        torchvision.transforms.RandomHorizontalFlip(p=0.5),
+        torchvision.transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+
+    dataset = torchvision.datasets.ImageFolder(dataset_path, transform=transforms)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return dataloader
+
 class LatentImageDataset(Dataset):
-    def __init__(self, latent_path):
-        self.path = latent_path
+    def __init__(self, latent_path, caption_path=None):
         std_latent = 2*(1/0.18215)
 
-        image_latents = torch.Tensor(np.load(latent_path)[:10000])
+        image_latents = torch.Tensor(np.load(latent_path))
         image_latents = image_latents.clamp(-std_latent, std_latent) / std_latent
         # image_latents = (image_latents + 1) / 2
         self.image_latents = image_latents
-        # self.image_latents = rearrange(image_latents, 'b h w c -> b c h w')
+        self.image_latents = rearrange(image_latents, 'b h w c -> b c h w')
         
         logger.info(f'{len(self.image_latents)} image samples loaded from {latent_path}.')
+
+        self.text_embs = None
+        if caption_path is not None:
+            self.text_embs = torch.Tensor(np.load(caption_path))
+            assert(len(self.text_embs) == len(self.image_latents))
+            logger.info(f'{len(self.text_embs)} text embeddings loaded from {caption_path}.')
 
     def __len__(self):
         return len(self.image_latents)
 
     def __getitem__(self, ind):
-        return self.image_latents[ind]
+        ret = {'data': self.image_latents[ind]}
+        if self.text_embs is not None:
+            ret.update({'label': self.text_embs[ind]})
+        return ret
 
 class LatentVideoDataset(Dataset):
     def __init__(self, root_dir, bucket_size, num_frames=8):
