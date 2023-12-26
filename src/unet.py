@@ -1,16 +1,17 @@
 import torch
 from einops import rearrange
 
-from unet3d import ResBlock, SelfAttention, positional_emb
+from unet3d import BasicTransformerBlock, ResBlock, positional_emb
 
 class DownBlock(torch.nn.Module):
     def __init__(
         self, 
         in_channels, 
         out_channels, 
-        pos_channels, 
+        pos_channels,
         block_depth,
-        use_attention
+        use_attention,
+        context_channels=None
     ):
         super().__init__()
         layers = []
@@ -21,23 +22,23 @@ class DownBlock(torch.nn.Module):
             modules.append(ResBlock(in_channels, out_channels, pos_channels))
             
             if use_attention:
-                modules.append(SelfAttention(out_channels))
+                modules.append(BasicTransformerBlock(out_channels, context_channels))
                 
             layers.append(torch.nn.ModuleList(modules))
 
         self.layers = torch.nn.ModuleList(layers)
         self.down_sampler = torch.nn.MaxPool2d(2)
 
-    def forward(self, x, skips, timesteps):
+    def forward(self, x, skips, timesteps, context=None):
         _, _, h, w = x.shape
         
         for modules in self.layers:
             for module in modules:
                 if isinstance(module, ResBlock):
                     x = module(x, timesteps)
-                elif isinstance(module, SelfAttention):
+                elif isinstance(module, BasicTransformerBlock):
                     x = rearrange(x, "b c h w -> b (h w) c")
-                    x = module(x)
+                    x = module(x, context=context)
                     x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
                 else:
                     raise NotImplementedError
@@ -54,6 +55,7 @@ class UpBlock(torch.nn.Module):
         pos_channels, 
         block_depth,
         use_attention,
+        context_channels=None
     ):
         super().__init__()
         layers = []
@@ -64,14 +66,14 @@ class UpBlock(torch.nn.Module):
             modules.append(ResBlock(in_channels, output_channels, pos_channels))
             
             if use_attention:
-                modules.append(SelfAttention(output_channels))
+                modules.append(BasicTransformerBlock(output_channels, context_channels))
                 
             layers.append(torch.nn.ModuleList(modules))
 
         self.layers = torch.nn.ModuleList(layers)
         self.up_sampler = torch.nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
 
-    def forward(self, x, skips, timesteps):
+    def forward(self, x, skips, timesteps, context=None):
         x = self.up_sampler(x)
         _, _, h, w = x.shape
 
@@ -81,9 +83,9 @@ class UpBlock(torch.nn.Module):
             for module in modules:
                 if isinstance(module, ResBlock):
                     x = module(x, timesteps)
-                elif isinstance(module, SelfAttention):
+                elif isinstance(module, BasicTransformerBlock):
                     x = rearrange(x, "b c h w -> b (h w) c")
-                    x = module(x)
+                    x = module(x, context=context)
                     x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
                 else:
                     raise NotImplementedError
@@ -100,6 +102,7 @@ class UNet(torch.nn.Module):
         output_channels,
         device,
         pos_channels=512,
+        context_channels=None,
         max_period=10000
     ):
         super().__init__()
@@ -120,7 +123,14 @@ class UNet(torch.nn.Module):
 
         for ind in range(len(widths)-1):
             use_attention = attention_levels[ind]
-            down_layers.append(DownBlock(widths[ind], widths[ind+1], pos_channels, block_depth, use_attention))
+            down_layers.append(DownBlock(
+                widths[ind], 
+                widths[ind+1], 
+                pos_channels, 
+                block_depth, 
+                use_attention, 
+                context_channels
+            ))
 
         self.down_layers = torch.nn.ModuleList(down_layers)
 
@@ -128,13 +138,20 @@ class UNet(torch.nn.Module):
             use_attention = attention_levels[ind]
             bottleneck_layers.append(ResBlock(widths[-1], widths[-1], pos_channels))
             if use_attention:
-                bottleneck_layers.append(SelfAttention(widths[-1]))
+                bottleneck_layers.append(BasicTransformerBlock(widths[-1], context_channels))
 
         self.bottleneck_layers = torch.nn.ModuleList(bottleneck_layers)
 
         for ind in reversed(range(1, len(widths))):
             use_attention = attention_levels[ind-1]
-            up_layers.append(UpBlock(widths[ind]*2, widths[ind-1], pos_channels, block_depth, use_attention))
+            up_layers.append(UpBlock(
+                widths[ind]*2, 
+                widths[ind-1], 
+                pos_channels, 
+                block_depth, 
+                use_attention, 
+                context_channels
+            ))
 
         self.up_layers = torch.nn.ModuleList(up_layers)
 
@@ -144,32 +161,28 @@ class UNet(torch.nn.Module):
             torch.nn.Conv2d(widths[0], output_channels, kernel_size=1)
         )
 
-    def forward(self, x, t, y=None, x_self_cond=None):
+    def forward(self, x, t, context=None, x_self_cond=None):
         timesteps = positional_emb(t, self.pos_channels, self.max_period)
-        if y is None:
-            y = torch.zeros_like(timesteps)
-        emb_and_noise = timesteps + y
-        
         x = self.inc(x)
         skips = []
 
         for downblock in self.down_layers:
-            x = downblock(x, skips, emb_and_noise)
+            x = downblock(x, skips, timesteps, context=context)
 
         _, _, h, w = x.shape
 
         for bottleneck_block in self.bottleneck_layers:
             if isinstance(bottleneck_block, ResBlock):
-                x = bottleneck_block(x, emb_and_noise)
-            elif isinstance(bottleneck_block, SelfAttention):
+                x = bottleneck_block(x, timesteps)
+            elif isinstance(bottleneck_block, BasicTransformerBlock):
                 x = rearrange(x, "b c h w -> b (h w) c")
-                x = bottleneck_block(x)
+                x = bottleneck_block(x, context=context)
                 x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
             else:
                 raise NotImplementedError
 
         for upblock in self.up_layers:
-            x = upblock(x, skips, emb_and_noise)
+            x = upblock(x, skips, timesteps, context=context)
 
         return self.out(x)
 

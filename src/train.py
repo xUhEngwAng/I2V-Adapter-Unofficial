@@ -6,8 +6,9 @@ import torch
 
 from einops import rearrange
 from data import LatentVideoDataset, LatentImageDataset
-from random import randint
+from random import randint, random
 from torch.utils.data import DataLoader
+from transformers import AutoProcessor, CLIPTextModel
 from unet3d import UNet3D
 from util import save_image_grid
 
@@ -25,6 +26,7 @@ channels_mults = [1, 2, 4]
 attention_levels = [1, 1, 1]
 block_depth = 1
 n_noise_steps = 1000
+max_tokens = 77
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def prepare_noise_scheduler():
@@ -38,7 +40,7 @@ def prepare_noise_scheduler():
 alpha, beta, alpha_hat = prepare_noise_scheduler()
 
 def noise_images(img, t):
-    noise_sampled = torch.randn_like(img).to(device)
+    noise_sampled = torch.randn_like(img, device=device)
     sqrt_alpha_hat = torch.sqrt(alpha_hat[t])[:, None, None, None]
     sqrt_one_minus_alpha_hat = torch.sqrt(1-alpha_hat[t])[:, None, None, None]
     return sqrt_alpha_hat * img + sqrt_one_minus_alpha_hat * noise_sampled, noise_sampled
@@ -55,20 +57,32 @@ def decode_latents(vae, video_latents, num_frames):
 
     return torch.cat(ret, axis=0)
 
-def sample(image_only, model, n, num_frames=1):
+def sample(image_only, model, n, cfg_scale, num_frames, context=None):
     if image_only:
         image_only_indicator=torch.Tensor([True]).to(device)
+        num_frames = 1
     else:
         image_only_indicator=torch.Tensor([False]).to(device)
     
     model.eval()
     start = time.time()
-    sampled_latents = torch.randn((n*num_frames, input_channels, latent_size, latent_size), dtype=torch.float).to(device)
+
+    if context is not None:
+        context = context.repeat(n, 1, 1).to(device)
+        n = len(context)
+        print(f'context shape: {context.shape}')
+        
+    sampled_latents = torch.randn((n*num_frames, input_channels, latent_size, latent_size), dtype=torch.float, device=device)
 
     with torch.no_grad():
         for timestep in reversed(range(1, n_noise_steps)):
-            t = torch.ones(n*num_frames, dtype=torch.long) * timestep
-            pred = model(sampled_latents, t[:, None].to(device), image_only_indicator)
+            t = torch.ones(n*num_frames, dtype=torch.long, device=device) * timestep
+            
+            pred = model(sampled_latents, t[:, None], image_only_indicator, context=context)
+            if cfg_scale > 0:
+                uncond_pred = model(sampled_latents, t[:, None], image_only_indicator, context=None)
+                pred = torch.lerp(uncond_pred, pred, cfg_scale)
+                
             alpha_t = alpha[t][:, None, None, None]
             alpha_hat_t = alpha_hat[t][:, None, None, None]
             beta_t = beta[t][:, None, None, None]
@@ -87,6 +101,10 @@ def sample(image_only, model, n, num_frames=1):
 def train(model, dataloader, args):
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr)
     loss_fn = torch.nn.MSELoss()
+
+    if args.condition_path is not None:
+        text_encoder = CLIPTextModel.from_pretrained("./clip-vit-base-patch32").eval().to(device)
+        tokenizer = AutoProcessor.from_pretrained("./clip-vit-base-patch32")
     
     for epoch in range(args.n_epoch):
         batch_cnt = 0
@@ -99,20 +117,37 @@ def train(model, dataloader, args):
         else:
             image_only_indicator=torch.Tensor([False]).to(device)
         
-        for ind, batch_images in enumerate(dataloader):
+        for ind, batch in enumerate(dataloader):
             batch_cnt += 1
+            
+            # tokenize and encode text prompts if available
+            if 'context' in batch:
+                if random() < args.uncondition_prob:
+                    context = None
+                else:
+                    prompts = batch['context']
+                    with torch.no_grad():
+                        tokens = tokenizer(text=prompts, return_tensors="pt", padding=True).to(device)
+                        # truncate to `max_tokens` tokens, default to 77
+                        tokens = {k: v[:, :max_tokens] for k, v in tokens.items()}
+                        context = text_encoder(**tokens, return_dict=False)[0]
+
+                    if not args.image_only:
+                        context = context.repeat(args.n_frames, 1, 1)
+            else:
+                context = None
 
             # expand each video to corresponding frames
+            batch_images = batch['data'].to(device)
             if not args.image_only:
                 batch_images = rearrange(batch_images, "b t c h w -> (b t) c h w")
             
-            batch_images = batch_images.to(device)
             # randomly sample a timestep for each image in the batch
             t = torch.randint(low=1, high=n_noise_steps, size=(len(batch_images), )).to(device)
             # perturb each image by noise step t
             perturbed_images, noises_sampled = noise_images(batch_images, t)
             # noise predition through UNet
-            pred = model(perturbed_images, t[:, None], image_only_indicator)
+            pred = model(perturbed_images, t[:, None], image_only_indicator, context=context)
             # calculate loss
             batch_loss = loss_fn(noises_sampled, pred)
             total_loss += batch_loss
@@ -123,8 +158,9 @@ def train(model, dataloader, args):
             optim.step()
 
         logger.info(f'[{epoch+1}|{args.n_epoch}] Training finished, time elapsed: {time.time()-start: .3f}s, total loss: {total_loss/batch_cnt: .3f}.')
+        
         if (epoch+1) % args.sample_epoch == 0:
-            sampled_latents = sample(args.image_only, model, 8, args.n_frames)
+            sampled_latents = sample(args.image_only, model, 8, args.cfg_ratio, args.n_frames, context[:8] if context is not None else None)
             torch.save(sampled_latents, os.path.join(args.result_path, f'sampled_latents_epoch_{epoch+1}.pt'))
             # save_image_grid(sampled_images, os.path.join(args.result_path, f'samples_epoch_{epoch+1}.png'))
 
@@ -137,9 +173,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--bucket_size', type=int, default=3, help='a random frame is sampled from each bucket')
+    parser.add_argument('--cfg_ratio', type=float, default=0, help='hyperparameter for classifier-free guidance')
     parser.add_argument('--checkpoint_epoch', type=int, default=50, help='save model ckpt every specified epoches')
     parser.add_argument('--checkpoint_path', type=str, default='./checkpoint/')
-    parser.add_argument('--dataset_path', type=str, default='./data/ucf101-latent/')
+    parser.add_argument('--condition_path', type=str, default=None)
+    parser.add_argument('--dataset_path', type=str, default='./data/ucf101/ucf101-latent/')
     parser.add_argument('--image_only', action='store_true')
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--n_epoch', type=int, default=300)
@@ -147,6 +185,7 @@ if __name__ == '__main__':
     parser.add_argument('--result_path', type=str, default='./result/')
     parser.add_argument('--sample_epoch', type=int, default=10)
     parser.add_argument('--task_name', type=str, default=None)
+    parser.add_argument('--uncondition_prob', type=float, default=0.0, help='unconditional probability')
     parser.add_argument('--use_checkpoint', type=str, default=None, help='checkpoint file to be loaded.')
 
     args = parser.parse_args()
@@ -163,11 +202,15 @@ if __name__ == '__main__':
         os.mkdir(args.checkpoint_path)
 
     if args.image_only:
-        latent_image_dataset = LatentImageDataset(args.dataset_path)
+        latent_image_dataset = LatentImageDataset(args.dataset_path, args.condition_path)
         dataloader = DataLoader(latent_image_dataset, batch_size=args.batch_size, shuffle=True)
     else:
         latent_video_dataset = LatentVideoDataset(args.dataset_path, args.bucket_size, args.n_frames)
         dataloader = DataLoader(latent_video_dataset, batch_size=args.batch_size, shuffle=True)
+
+    if args.condition_path is None:
+        # disable classifer-free guidance sampling
+        args.cfg_ratio = 0
 
     widths = [model_channels * mult for mult in channels_mults]
     model = UNet3D(
@@ -177,7 +220,8 @@ if __name__ == '__main__':
         input_channels, 
         output_channels, 
         device, 
-        num_frames=args.n_frames
+        num_frames=args.n_frames,
+        context_channels=512
     ).to(device)
     
     if not args.use_checkpoint is None:

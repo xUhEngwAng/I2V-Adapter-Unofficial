@@ -34,19 +34,36 @@ class LatentImageDataset(Dataset):
         
         logger.info(f'{len(self.image_latents)} image samples loaded from {latent_path}.')
 
+        '''
         self.text_embs = None
         if caption_path is not None:
             self.text_embs = torch.Tensor(np.load(caption_path))
             assert(len(self.text_embs) == len(self.image_latents))
             logger.info(f'{len(self.text_embs)} text embeddings loaded from {caption_path}.')
+        '''
+
+        self.prompts = None
+        
+        if caption_path is not None:
+            prompts = []
+            
+            with open(caption_path, 'r') as f:
+                for line in f.readlines():
+                    prompts.append(line)
+
+            prompts = prompts
+            assert len(prompts) == len(self.image_latents), '# image latents and corresponding prompts should match.'
+            self.prompts = prompts
+            
+            logger.info(f'{len(self.prompts)} text prompts loaded from {caption_path}.')
 
     def __len__(self):
         return len(self.image_latents)
 
     def __getitem__(self, ind):
         ret = {'data': self.image_latents[ind]}
-        if self.text_embs is not None:
-            ret.update({'label': self.text_embs[ind]})
+        if self.prompts is not None:
+            ret.update({'context': self.prompts[ind]})
         return ret
 
 class LatentVideoDataset(Dataset):
@@ -96,4 +113,11 @@ class LatentVideoDataset(Dataset):
 
     def __getitem__(self, ind):
         video_latent = self.video_latents[ind]
-        return self.sample_frames(video_latent)
+        return {'data': self.sample_frames(video_latent)}
+
+if __name__ == '__main__':
+    latent_image_path = './data/landscape_and_portrait/16_16_latent_embeddings.npy'
+    prompts_path = './data/landscape_and_portrait/captions.txt'
+    latent_image_dataset = LatentImageDataset(latent_image_path, prompts_path)
+    dataloader = DataLoader(latent_image_dataset, shuffle=True, batch_size=64)
+    print(next(iter(dataloader)))

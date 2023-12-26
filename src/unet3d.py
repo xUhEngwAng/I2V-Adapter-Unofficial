@@ -4,7 +4,7 @@ from einops import rearrange, repeat
 from typing import Iterable
 
 def positional_emb(t, channels, max_period=10000):
-    freqs = 1 / (max_period ** (torch.arange(0, channels, 2).to(t.device) / channels))
+    freqs = 1 / (max_period ** (torch.arange(0, channels, 2, device=t.device) / channels))
     pos_emb_sin = torch.sin(t.repeat(1, channels // 2) * freqs)
     pos_emb_cos = torch.cos(t.repeat(1, channels // 2) * freqs)
     return torch.cat([pos_emb_sin, pos_emb_cos], dim=-1)
@@ -93,36 +93,92 @@ class SelfAttention(torch.nn.Module):
         x_ff = self.ff_layer(x_mha) + x_mha
         return x_ff
 
-class VideoSelfAttention(SelfAttention):
+class BasicAttention(torch.nn.Module):
+    def __init__(self, query_dim, context_dim=None, head_dim=64, num_heads=8, dropout=0.0):
+        super().__init__()
+        inner_dim = head_dim * num_heads
+        context_dim = query_dim if context_dim is None else context_dim
+        self.num_heads = num_heads
+    
+        self.to_q = torch.nn.Linear(query_dim, inner_dim, bias=False)
+        self.to_k = torch.nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_v = torch.nn.Linear(context_dim, inner_dim, bias=False)
+
+        self.to_out = torch.nn.Sequential(
+            torch.nn.Linear(inner_dim, query_dim), 
+            torch.nn.Dropout(dropout)
+        )
+
+    def forward(self, x, context=None):
+        '''
+        Perform self-attention if `context` is None.
+        Code heavily borrowed from 
+        https://github.com/Stability-AI/generative-models/blob/main/sgm/modules/attention.py#L255
+        '''
+        h = self.num_heads
+        
+        q = self.to_q(x)
+        context = x if context is None else context
+        # print(f'context shape: {context.shape}')
+        k = self.to_k(context)
+        v = self.to_v(context)
+        
+        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q, k, v))
+        out = torch.nn.functional.scaled_dot_product_attention(q, k, v)  # scale is dim_head ** -0.5 per default
+
+        del q, k, v
+        out = rearrange(out, "b h n d -> b n (h d)", h=h)
+
+        return self.to_out(out)
+
+class BasicTransformerBlock(torch.nn.Module):
+    def __init__(self, query_dim, context_dim=None, head_dim=64, num_heads=8):
+        super().__init__()
+        # attn1 default to self-attention
+        self.attn1 = BasicAttention(query_dim, query_dim, head_dim, num_heads)
+        # attn2 default to cross-attention if `context_dim` is provided
+        self.attn2 = BasicAttention(query_dim, context_dim, head_dim, num_heads)
+        self.norm1 = torch.nn.LayerNorm(query_dim)
+        self.norm2 = torch.nn.LayerNorm(query_dim)
+
+    def forward(self, x, context=None):
+        # print(f'x shape: {x.shape}')
+        # print(f'context shape: {context.shape}')
+        x = self.attn1(self.norm1(x)) + x
+        x = self.attn2(self.norm2(x), context) + x
+        return x
+
+class VideoTransformer(BasicTransformerBlock):
     def __init__(
         self, 
-        n_channels, 
-        num_heads=4, 
+        n_channels,
+        context_channels=None,
         merge_factor=0.5
     ):
-        super().__init__(n_channels, num_heads)
+        super().__init__(n_channels, context_channels)
         
         self.n_channels = n_channels
 
-        self.video_attn = SelfAttention(n_channels, num_heads)
+        self.video_attn = BasicTransformerBlock(n_channels, context_channels)
 
         time_embed_dim = self.n_channels * 4
         self.frame_pos_embed = torch.nn.Sequential(
             torch.nn.Linear(self.n_channels, time_embed_dim),
             torch.nn.SiLU(),
-            torch.nn.Linear(time_embed_dim, self.n_channels),
+            torch.nn.Linear(time_embed_dim, self.n_channels)
         )
 
         self.time_mixer = AlphaBlender(
             alpha=merge_factor, merge_strategy="learned_with_images"
         )
         
-    def forward(self, x, num_frames, image_only_indicator):
+    def forward(self, x, context, num_frames, image_only_indicator):
         x_in = x
         _, _, h, w = x_in.shape
+        # print(f'h={h}, w={w}, x shape: {x.shape}')
         
         x = rearrange(x, "b c h w -> b (h w) c")
-        x_spatial = super().forward(x)
+        x_spatial = super().forward(x, context=context)
 
         # positional embedding for each frame
         frames = torch.arange(1, 1+num_frames, device=x.device)
@@ -131,9 +187,12 @@ class VideoSelfAttention(SelfAttention):
         pos_emb = positional_emb(frames, self.n_channels)
         emb_out = self.frame_pos_embed(pos_emb)[:, None, :]
 
+        if context is not None:
+            context = repeat(context, "b ... -> (b n) ...", n=h*w // num_frames)
+
         x_temporal = x_spatial + emb_out
         x_temporal = rearrange(x_spatial, "(b t) s c -> (b s) t c", t=num_frames)
-        x_temporal = self.video_attn(x_temporal)
+        x_temporal = self.video_attn(x_temporal, context=context)
         x_temporal = rearrange(x_temporal, "(b s) t c -> (b t) s c", s=h*w)
 
         output = self.time_mixer(
@@ -220,7 +279,7 @@ class VideoResBlock(ResBlock):
         video_kernel_size,
         mid_channels=None,
         group_nums=8,
-        merge_factor=0.5,
+        merge_factor=0.5
     ):
         super().__init__(
             in_channels, 
@@ -267,6 +326,7 @@ class DownBlock3D(torch.nn.Module):
         use_attention,
         kernel_size=[3, 1, 1],
         num_frames=8,
+        context_channels=None
     ):
         super().__init__()
         self.num_frames = num_frames
@@ -278,20 +338,20 @@ class DownBlock3D(torch.nn.Module):
             modules.append(VideoResBlock(in_channels, out_channels, pos_channels, kernel_size))
             
             if use_attention:
-                modules.append(VideoSelfAttention(out_channels))
+                modules.append(VideoTransformer(out_channels, context_channels))
                 
             layers.append(torch.nn.ModuleList(modules))
 
         self.layers = torch.nn.ModuleList(layers)
         self.down_sampler = torch.nn.MaxPool2d(2)
 
-    def forward(self, x, skips, timesteps, image_only_indicator):
+    def forward(self, x, context, skips, timesteps, image_only_indicator):
         for modules in self.layers:
             for module in modules:
                 if isinstance(module, VideoResBlock):
                     x = module(x, timesteps, self.num_frames, image_only_indicator)
-                elif isinstance(module, VideoSelfAttention):
-                    x = module(x, self.num_frames, image_only_indicator)
+                elif isinstance(module, VideoTransformer):
+                    x = module(x, context, self.num_frames, image_only_indicator)
                 else:
                     raise NotImplementedError
 
@@ -309,6 +369,7 @@ class UpBlock3D(torch.nn.Module):
         use_attention,
         kernel_size=[3, 1, 1],
         num_frames=8,
+        context_channels=None
     ):
         super().__init__()
         self.num_frames = num_frames
@@ -320,14 +381,14 @@ class UpBlock3D(torch.nn.Module):
             modules.append(VideoResBlock(in_channels, output_channels, pos_channels, kernel_size))
             
             if use_attention:
-                modules.append(VideoSelfAttention(output_channels))
+                modules.append(VideoTransformer(output_channels, context_channels))
                 
             layers.append(torch.nn.ModuleList(modules))
 
         self.layers = torch.nn.ModuleList(layers)
         self.up_sampler = torch.nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
 
-    def forward(self, x, skips, timesteps, image_only_indicator):
+    def forward(self, x, context, skips, timesteps, image_only_indicator):
         x = self.up_sampler(x)
 
         for modules in self.layers:
@@ -336,8 +397,8 @@ class UpBlock3D(torch.nn.Module):
             for module in modules:
                 if isinstance(module, VideoResBlock):
                     x = module(x, timesteps, self.num_frames, image_only_indicator)
-                elif isinstance(module, VideoSelfAttention):
-                    x = module(x, self.num_frames, image_only_indicator)
+                elif isinstance(module, VideoTransformer):
+                    x = module(x, context, self.num_frames, image_only_indicator)
                 else:
                     raise NotImplementedError
         
@@ -356,7 +417,8 @@ class UNet3D(torch.nn.Module):
         num_frames=8,
         num_groups=8, 
         pos_channels=256,
-        max_period=10000
+        context_channels=None,
+        max_period=10000,
     ):
         super().__init__()
         assert(len(widths) == len(attention_levels))
@@ -373,7 +435,15 @@ class UNet3D(torch.nn.Module):
 
         for ind in range(len(widths)-1):
             use_attention = attention_levels[ind]
-            down_layers.append(DownBlock3D(widths[ind], widths[ind+1], pos_channels, block_depth, use_attention, num_frames=num_frames))
+            down_layers.append(DownBlock3D(
+                widths[ind], 
+                widths[ind+1], 
+                pos_channels, 
+                block_depth, 
+                use_attention, 
+                num_frames=num_frames,
+                context_channels=context_channels
+            ))
 
         self.down_layers = torch.nn.ModuleList(down_layers)
 
@@ -381,13 +451,21 @@ class UNet3D(torch.nn.Module):
             use_attention = attention_levels[ind]
             bottleneck_layers.append(VideoResBlock(widths[-1], widths[-1], pos_channels, kernel_size))
             if use_attention:
-                bottleneck_layers.append(VideoSelfAttention(widths[-1]))
+                bottleneck_layers.append(VideoTransformer(widths[-1], context_channels))
 
         self.bottleneck_layers = torch.nn.ModuleList(bottleneck_layers)
 
         for ind in reversed(range(1, len(widths))):
             use_attention = attention_levels[ind-1]
-            up_layers.append(UpBlock3D(widths[ind]*2, widths[ind-1], pos_channels, block_depth, use_attention, num_frames=num_frames))
+            up_layers.append(UpBlock3D(
+                widths[ind]*2, 
+                widths[ind-1], 
+                pos_channels, 
+                block_depth, 
+                use_attention, 
+                num_frames=num_frames,
+                context_channels=context_channels
+            ))
 
         self.up_layers = torch.nn.ModuleList(up_layers)
 
@@ -397,24 +475,24 @@ class UNet3D(torch.nn.Module):
             torch.nn.Conv2d(widths[0], output_channels, kernel_size=1)
         )
 
-    def forward(self, x, t, image_only_indicator):
+    def forward(self, x, t, image_only_indicator, context=None):
         timesteps = positional_emb(t, self.pos_channels, self.max_period)
         x = self.inc(x)
         skips = []
 
         for downblock in self.down_layers:
-            x = downblock(x, skips, timesteps, image_only_indicator)
+            x = downblock(x, context, skips, timesteps, image_only_indicator)
 
         for layer in self.bottleneck_layers:
             if isinstance(layer, VideoResBlock):
                 x = layer(x, timesteps, self.num_frames, image_only_indicator)
-            elif isinstance(layer, VideoSelfAttention):
-                x = layer(x, self.num_frames, image_only_indicator)
+            elif isinstance(layer, VideoTransformer):
+                x = layer(x, context, self.num_frames, image_only_indicator)
             else:
                 raise NotImplementedError
 
         for upblock in self.up_layers:
-            x = upblock(x, skips, timesteps, image_only_indicator)
+            x = upblock(x, context, skips, timesteps, image_only_indicator)
 
         return self.out(x)
 
