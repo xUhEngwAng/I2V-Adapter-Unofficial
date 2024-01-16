@@ -34,16 +34,7 @@ class LatentImageDataset(Dataset):
         
         logger.info(f'{len(self.image_latents)} image samples loaded from {latent_path}.')
 
-        '''
-        self.text_embs = None
-        if caption_path is not None:
-            self.text_embs = torch.Tensor(np.load(caption_path))
-            assert(len(self.text_embs) == len(self.image_latents))
-            logger.info(f'{len(self.text_embs)} text embeddings loaded from {caption_path}.')
-        '''
-
-        self.prompts = None
-        
+        self.prompts = None 
         if caption_path is not None:
             prompts = []
             
@@ -56,6 +47,9 @@ class LatentImageDataset(Dataset):
             self.prompts = prompts
             
             logger.info(f'{len(self.prompts)} text prompts loaded from {caption_path}.')
+
+    def get_prompts(self):
+        return self.prompts
 
     def __len__(self):
         return len(self.image_latents)

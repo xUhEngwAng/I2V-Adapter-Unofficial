@@ -1,16 +1,20 @@
 import argparse
 import logging
 import os
+import sys
 import time
 import torch
 
 from einops import rearrange
-from data import LatentVideoDataset, LatentImageDataset
 from random import randint, random
 from torch.utils.data import DataLoader
 from transformers import AutoProcessor, CLIPTextModel
-from unet3d import UNet3D
-from util import save_image_grid
+
+sys.path.append('./')
+
+from src.models.unet import UNet
+from src.data import LatentImageDataset, obtain_dataloader
+from src.util import save_image_grid
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger('PIL').setLevel(logging.WARNING)
@@ -21,18 +25,17 @@ logger = logging.getLogger(__name__)
 latent_size = 16
 input_channels = 4
 output_channels = 4
-model_channels = 128
-channels_mults = [1, 2, 4]
+model_channels = 256
+channels_mults = [1, 2, 2]
 attention_levels = [1, 1, 1]
-block_depth = 1
+block_depth = 3
 n_noise_steps = 1000
-max_tokens = 77
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def prepare_noise_scheduler():
     beta_start = 1e-4
     beta_end = 0.02
-    beta = torch.linspace(beta_start, beta_end, n_noise_steps).to(device)
+    beta = torch.linspace(beta_start, beta_end, n_noise_steps, device=device)
     alpha = 1 - beta
     alpha_hat = torch.cumprod(alpha, dim=0)
     return alpha, beta, alpha_hat
@@ -45,43 +48,38 @@ def noise_images(img, t):
     sqrt_one_minus_alpha_hat = torch.sqrt(1-alpha_hat[t])[:, None, None, None]
     return sqrt_alpha_hat * img + sqrt_one_minus_alpha_hat * noise_sampled, noise_sampled
 
-def decode_latents(vae, video_latents, num_frames):
-    # TODO: 
-    video_latents = rearrange(video_latents, "(b t) c h w -> b t c h w")
-    ret = []
-    
-    with torch.no_grad():
-        for latent in video_latents:
-            decoded = vae.decode(video_latents, return_dict=False)[0]
-            ret.append(decoded)
-
-    return torch.cat(ret, axis=0)
-
-def sample(image_only, model, n, cfg_scale, num_frames, context=None):
-    if image_only:
-        image_only_indicator=torch.Tensor([True]).to(device)
-        num_frames = 1
-    else:
-        image_only_indicator=torch.Tensor([False]).to(device)
-    
+def sample(model, tokenizer, text_encoder, cfg_scale, prompts):
+    '''
+    sample `model` for each prompt for `n` times.
+    '''
     model.eval()
     start = time.time()
 
-    if context is not None:
-        context = context.repeat(n, 1, 1).to(device)
-        n = len(context)
-        print(f'context shape: {context.shape}')
-        
-    sampled_latents = torch.randn((n*num_frames, input_channels, latent_size, latent_size), dtype=torch.float, device=device)
+    # encode input prompt string into textual latent space
+    text_inputs = tokenizer(text=prompts, padding=True, truncation=True, max_length=text_encoder.config.max_position_embeddings, return_tensors="pt")
+    text_embeddings = text_encoder(text_inputs.input_ids.to(device), return_dict=False)[0]
+    batch_size = len(text_embeddings)
+
+    # unconditional text embeddings for classifier free guidance
+    max_length = text_inputs.input_ids.shape[-1]
+    uncond_input = tokenizer(text=[""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt")
+    uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
+
+    text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+    sampled_latents = torch.randn((batch_size, input_channels, latent_size, latent_size), dtype=torch.float, device=device)
 
     with torch.no_grad():
         for timestep in reversed(range(1, n_noise_steps)):
-            t = torch.ones(n*num_frames, dtype=torch.long, device=device) * timestep
+            # expand the latents for classifier-free guidance to avoid doing two forward passes.
+            latent_model_input = torch.cat([sampled_latents] * 2)
             
-            pred = model(sampled_latents, t[:, None], image_only_indicator, context=context)
-            if cfg_scale > 0:
-                uncond_pred = model(sampled_latents, t[:, None], image_only_indicator, context=None)
-                pred = torch.lerp(uncond_pred, pred, cfg_scale)
+            t = torch.ones(batch_size, dtype=torch.long, device=device) * timestep
+
+            noise_pred = model(latent_model_input, torch.cat([t, t])[:, None], text_embeddings)
+            
+            # perform guidance
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_text - noise_pred_uncond)
                 
             alpha_t = alpha[t][:, None, None, None]
             alpha_hat_t = alpha_hat[t][:, None, None, None]
@@ -92,19 +90,17 @@ def sample(image_only, model, n, cfg_scale, num_frames, context=None):
             else:
                 noise = torch.zeros_like(sampled_latents)
                 
-            sampled_latents = 1/torch.sqrt(alpha_t)*(sampled_latents-((1-alpha_t)/(torch.sqrt(1-alpha_hat_t)))*pred)+torch.sqrt(beta_t)*noise
+            sampled_latents = 1 / torch.sqrt(alpha_t) * (sampled_latents - ((1 - alpha_t) / (torch.sqrt(1 - alpha_hat_t))) * noise_pred) + torch.sqrt(beta_t) * noise
 
     model.train()
-    logger.info(f'Done sampling {n*num_frames} latents, time elapsed: {time.time() - start: .3f}s.')
+    logger.info(f'Done sampling {batch_size} latents, time elapsed: {time.time() - start: .3f}s.')
     return sampled_latents
 
-def train(model, dataloader, args):
+def train(model, dataloader, eval_prompts, args):
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr)
     loss_fn = torch.nn.MSELoss()
-
-    if args.condition_path is not None:
-        text_encoder = CLIPTextModel.from_pretrained("./clip-vit-base-patch32").eval().to(device)
-        tokenizer = AutoProcessor.from_pretrained("./clip-vit-base-patch32")
+    text_encoder = CLIPTextModel.from_pretrained("./clip-vit-base-patch32").eval().to(device)
+    tokenizer = AutoProcessor.from_pretrained("./clip-vit-base-patch32")
     
     for epoch in range(args.n_epoch):
         batch_cnt = 0
@@ -112,42 +108,26 @@ def train(model, dataloader, args):
         model.train()
         start = time.time()
         
-        if args.image_only:
-            image_only_indicator=torch.Tensor([True]).to(device)
-        else:
-            image_only_indicator=torch.Tensor([False]).to(device)
-        
         for ind, batch in enumerate(dataloader):
             batch_cnt += 1
-            
-            # tokenize and encode text prompts if available
-            if 'context' in batch:
-                if random() < args.uncondition_prob:
-                    context = None
-                else:
-                    prompts = batch['context']
-                    with torch.no_grad():
-                        tokens = tokenizer(text=prompts, return_tensors="pt", padding=True).to(device)
-                        # truncate to `max_tokens` tokens, default to 77
-                        tokens = {k: v[:, :max_tokens] for k, v in tokens.items()}
-                        context = text_encoder(**tokens, return_dict=False)[0]
 
-                    if not args.image_only:
-                        context = context.repeat(args.n_frames, 1, 1)
+            # classifier-free guidance
+            if random() < args.uncondition_prob:
+                prompts = [''] * len(batch['data'])
             else:
-                context = None
-
-            # expand each video to corresponding frames
+                prompts = batch['context']
+                
+            with torch.no_grad():
+                text_inputs = tokenizer(text=prompts, padding=True, truncation=True, max_length=text_encoder.config.max_position_embeddings, return_tensors="pt")
+                text_embeddings = text_encoder(text_inputs.input_ids.to(device), return_dict=False)[0]
+                
             batch_images = batch['data'].to(device)
-            if not args.image_only:
-                batch_images = rearrange(batch_images, "b t c h w -> (b t) c h w")
-            
             # randomly sample a timestep for each image in the batch
-            t = torch.randint(low=1, high=n_noise_steps, size=(len(batch_images), )).to(device)
+            t = torch.randint(low=1, high=n_noise_steps, size=(len(batch_images), ), device=device)
             # perturb each image by noise step t
             perturbed_images, noises_sampled = noise_images(batch_images, t)
             # noise predition through UNet
-            pred = model(perturbed_images, t[:, None], image_only_indicator, context=context)
+            pred = model(perturbed_images, t[:, None], context=text_embeddings)
             # calculate loss
             batch_loss = loss_fn(noises_sampled, pred)
             total_loss += batch_loss
@@ -160,7 +140,7 @@ def train(model, dataloader, args):
         logger.info(f'[{epoch+1}|{args.n_epoch}] Training finished, time elapsed: {time.time()-start: .3f}s, total loss: {total_loss/batch_cnt: .3f}.')
         
         if (epoch+1) % args.sample_epoch == 0:
-            sampled_latents = sample(args.image_only, model, 8, args.cfg_ratio, args.n_frames, context[:8] if context is not None else None)
+            sampled_latents = sample(model, tokenizer, text_encoder, args.cfg_ratio, eval_prompts)
             torch.save(sampled_latents, os.path.join(args.result_path, f'sampled_latents_epoch_{epoch+1}.pt'))
             # save_image_grid(sampled_images, os.path.join(args.result_path, f'samples_epoch_{epoch+1}.png'))
 
@@ -171,21 +151,19 @@ def train(model, dataloader, args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--bucket_size', type=int, default=3, help='a random frame is sampled from each bucket')
+    parser.add_argument('--batch_size', type=int, default=80)
+    parser.add_argument('--eval_batch_size', type=int, default=16)
     parser.add_argument('--cfg_ratio', type=float, default=0, help='hyperparameter for classifier-free guidance')
     parser.add_argument('--checkpoint_epoch', type=int, default=50, help='save model ckpt every specified epoches')
     parser.add_argument('--checkpoint_path', type=str, default='./checkpoint/')
-    parser.add_argument('--condition_path', type=str, default=None)
-    parser.add_argument('--dataset_path', type=str, default='./data/ucf101/ucf101-latent/')
-    parser.add_argument('--image_only', action='store_true')
+    parser.add_argument('--condition_path', type=str, default='./data/landscape_and_portrait/captions.txt')
+    parser.add_argument('--dataset_path', type=str, default='./data/landscape_and_portrait/16_16_latent_embeddings.npy')
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--n_epoch', type=int, default=300)
-    parser.add_argument('--n_frames', type=int, default=8, help='# frames sampled from each video')
     parser.add_argument('--result_path', type=str, default='./result/')
     parser.add_argument('--sample_epoch', type=int, default=10)
     parser.add_argument('--task_name', type=str, default=None)
-    parser.add_argument('--uncondition_prob', type=float, default=0.0, help='unconditional probability')
+    parser.add_argument('--uncondition_prob', type=float, default=0.15, help='unconditional probability')
     parser.add_argument('--use_checkpoint', type=str, default=None, help='checkpoint file to be loaded.')
 
     args = parser.parse_args()
@@ -201,26 +179,22 @@ if __name__ == '__main__':
     if not os.path.exists(args.checkpoint_path):
         os.mkdir(args.checkpoint_path)
 
-    if args.image_only:
-        latent_image_dataset = LatentImageDataset(args.dataset_path, args.condition_path)
-        dataloader = DataLoader(latent_image_dataset, batch_size=args.batch_size, shuffle=True)
-    else:
-        latent_video_dataset = LatentVideoDataset(args.dataset_path, args.bucket_size, args.n_frames)
-        dataloader = DataLoader(latent_video_dataset, batch_size=args.batch_size, shuffle=True)
+    if args.condition_path is None or args.dataset_path is None:
+        logger.error('condition path and dataset path must be specified, but got None. Abort.')
+        exit(-1)
 
-    if args.condition_path is None:
-        # disable classifer-free guidance sampling
-        args.cfg_ratio = 0
-
+    latent_image_dataset = LatentImageDataset(args.dataset_path, args.condition_path)
+    eval_prompts = latent_image_dataset.get_prompts()[:args.eval_batch_size]
+    dataloader = DataLoader(latent_image_dataset, batch_size=args.batch_size, shuffle=True)
+        
     widths = [model_channels * mult for mult in channels_mults]
-    model = UNet3D(
-        block_depth,
-        widths,
-        attention_levels,
-        input_channels, 
-        output_channels, 
-        device, 
-        num_frames=args.n_frames,
+    model = UNet(
+        block_depth, 
+        widths, 
+        attention_levels, 
+        input_channels,
+        output_channels,
+        device,
         context_channels=512
     ).to(device)
     
@@ -234,7 +208,7 @@ if __name__ == '__main__':
 
     start = time.time()
     logger.info(f'Start training task {args.task_name} for {args.n_epoch} epoches, with batch size {args.batch_size}.')
-    train(model, dataloader, args)
+    train(model, dataloader, eval_prompts, args)
     logger.info(f'Finish training task {args.task_name} after {args.n_epoch} epoches, time eplased: {time.time() - start: .3f}s.')
 
     model_save_path = os.path.join(args.checkpoint_path, f'epoch_{args.n_epoch}.pt')
