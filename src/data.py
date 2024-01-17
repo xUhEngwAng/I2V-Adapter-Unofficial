@@ -28,7 +28,6 @@ class LatentImageDataset(Dataset):
 
         image_latents = torch.Tensor(np.load(latent_path))
         image_latents = image_latents.clamp(-std_latent, std_latent) / std_latent
-        # image_latents = (image_latents + 1) / 2
         self.image_latents = image_latents
         self.image_latents = rearrange(image_latents, 'b h w c -> b c h w')
         
@@ -42,7 +41,6 @@ class LatentImageDataset(Dataset):
                 for line in f.readlines():
                     prompts.append(line)
 
-            prompts = prompts
             assert len(prompts) == len(self.image_latents), '# image latents and corresponding prompts should match.'
             self.prompts = prompts
             
@@ -61,29 +59,42 @@ class LatentImageDataset(Dataset):
         return ret
 
 class LatentVideoDataset(Dataset):
-    def __init__(self, root_dir, bucket_size, num_frames=8):
+    def __init__(
+        self, 
+        latent_path, 
+        frames_per_video_path, 
+        caption_path, 
+        bucket_size, 
+        num_frames=8
+    ):
         super().__init__()
 
         self.bucket_size = bucket_size
         self.num_frames = num_frames
 
-        self.paths = [str(p) for p in Path(root_dir).glob('**/*.pt')]
-        self.video_latents = []
-
-        filter_cnt = 0
         std_latent = 2*(1/0.18215)
+        video_latents = torch.Tensor(np.load(latent_path))
+        video_latents = video_latents.clamp(-std_latent, std_latent) / std_latent
 
-        # filter videos whose frame count is less than `bucket_size x num_frames`
-        for path in self.paths:
-            video_latent = torch.load(path, map_location='cpu')
-            frame_cnt = len(video_latent)
-            if bucket_size * num_frames <= frame_cnt:
-                video_latent = video_latent.clamp(-std_latent, std_latent) / std_latent
-                self.video_latents.append(video_latent)
-            else:
-                filter_cnt += 1
+        frames_per_video = np.load(frames_per_video_path)
+        frames_per_video_acc = np.hstack((0, frames_per_video.cumsum()))
+        
+        self.video_latents = video_latents
+        self.frames_per_video_acc = frames_per_video_acc
+        logger.info(f'{len(frames_per_video)} video samples loaded from {latent_path}.')
 
-        logger.info(f'{len(self.video_latents)} video samples loaded from {root_dir}, with {filter_cnt} filtered.')
+        self.prompts = None 
+        if caption_path is not None:
+            prompts = []
+            
+            with open(caption_path, 'r') as f:
+                for line in f.readlines():
+                    prompts.append(line)
+
+            assert len(prompts) == len(frames_per_video), '# video latents and corresponding prompts should match.'
+            self.prompts = prompts
+            
+            logger.info(f'{len(self.prompts)} text prompts loaded from {caption_path}.')
 
     def sample_frames(self, frames):
         '''
@@ -102,12 +113,23 @@ class LatentVideoDataset(Dataset):
             
         return frames[indices]
 
+    def get_prompts(self):
+        return self.prompts
+
     def __len__(self):
-        return len(self.video_latents)
+        return len(self.frames_per_video_acc) - 1
 
     def __getitem__(self, ind):
-        video_latent = self.video_latents[ind]
-        return {'data': self.sample_frames(video_latent)}
+        start_frame = self.frames_per_video_acc[ind]
+        end_frame = self.frames_per_video_acc[ind+1]
+        video_latent = self.video_latents[start_frame: end_frame]
+        
+        ret = {'data': self.sample_frames(video_latent)}
+        
+        if self.prompts is not None:
+            ret.update({'context': self.prompts[ind]})
+            
+        return ret
 
 if __name__ == '__main__':
     latent_image_path = './data/landscape_and_portrait/16_16_latent_embeddings.npy'
