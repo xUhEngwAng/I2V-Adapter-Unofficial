@@ -5,6 +5,7 @@ import sys
 import time
 import torch
 
+from accelerate import Accelerator
 from einops import rearrange
 from random import randint, random
 from torch.utils.data import DataLoader
@@ -30,7 +31,10 @@ channels_mults = [1, 2, 2]
 attention_levels = [1, 1, 1]
 block_depth = 3
 n_noise_steps = 1000
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Accelerator initialization
+accelerator = Accelerator()
+device = accelerator.device
 
 def prepare_noise_scheduler():
     beta_start = 1e-4
@@ -96,8 +100,7 @@ def sample(model, tokenizer, text_encoder, cfg_scale, prompts):
     logger.info(f'Done sampling {batch_size} latents, time elapsed: {time.time() - start: .3f}s.')
     return sampled_latents
 
-def train(model, dataloader, eval_prompts, args):
-    optim = torch.optim.AdamW(model.parameters(), lr=args.lr)
+def train(model, optimizer, dataloader, eval_prompts, args):
     loss_fn = torch.nn.MSELoss()
     text_encoder = CLIPTextModel.from_pretrained("./clip-vit-base-patch32").eval().to(device)
     tokenizer = AutoProcessor.from_pretrained("./clip-vit-base-patch32")
@@ -121,7 +124,7 @@ def train(model, dataloader, eval_prompts, args):
                 text_inputs = tokenizer(text=prompts, padding=True, truncation=True, max_length=text_encoder.config.max_position_embeddings, return_tensors="pt")
                 text_embeddings = text_encoder(text_inputs.input_ids.to(device), return_dict=False)[0]
                 
-            batch_images = batch['data'].to(device)
+            batch_images = batch['data']
             # randomly sample a timestep for each image in the batch
             t = torch.randint(low=1, high=n_noise_steps, size=(len(batch_images), ), device=device)
             # perturb each image by noise step t
@@ -133,9 +136,9 @@ def train(model, dataloader, eval_prompts, args):
             total_loss += batch_loss
     
             # backward pass
-            optim.zero_grad()
-            batch_loss.backward()
-            optim.step()
+            optimizer.zero_grad()
+            accelerator.backward(batch_loss)
+            optimizer.step()
 
         logger.info(f'[{epoch+1}|{args.n_epoch}] Training finished, time elapsed: {time.time()-start: .3f}s, total loss: {total_loss/batch_cnt: .3f}.')
         
@@ -153,7 +156,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=80)
     parser.add_argument('--eval_batch_size', type=int, default=16)
-    parser.add_argument('--cfg_ratio', type=float, default=0, help='hyperparameter for classifier-free guidance')
+    parser.add_argument('--cfg_ratio', type=float, default=3.5, help='hyperparameter for classifier-free guidance')
     parser.add_argument('--checkpoint_epoch', type=int, default=50, help='save model ckpt every specified epoches')
     parser.add_argument('--checkpoint_path', type=str, default='./checkpoint/')
     parser.add_argument('--condition_path', type=str, default='./data/landscape_and_portrait/captions.txt')
@@ -196,7 +199,7 @@ if __name__ == '__main__':
         output_channels,
         device,
         context_channels=512
-    ).to(device)
+    )
     
     if not args.use_checkpoint is None:
         try:
@@ -206,9 +209,14 @@ if __name__ == '__main__':
         except:
             logger.warning(f'Failed to load model from checkpoint {args.use_checkpoint}. Train from scratch instead.')
 
+    optim = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    model, optim, dataloader = accelerator.prepare(
+        model, optim, dataloader
+    )
+
     start = time.time()
     logger.info(f'Start training task {args.task_name} for {args.n_epoch} epoches, with batch size {args.batch_size}.')
-    train(model, dataloader, eval_prompts, args)
+    train(model, optim, dataloader, eval_prompts, args)
     logger.info(f'Finish training task {args.task_name} after {args.n_epoch} epoches, time eplased: {time.time() - start: .3f}s.')
 
     model_save_path = os.path.join(args.checkpoint_path, f'epoch_{args.n_epoch}.pt')
