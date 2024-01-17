@@ -79,8 +79,9 @@ class TestVideoTransformer(unittest.TestCase):
         self.video_cross_transformer = VideoTransformer(self.n_channels, context_channels=self.context_dim)
 
     def testVideoSelfTransformer_output_shape(self):
+        # image_only_indicator is True
         batch_feat_map = torch.randn([
-            self.batch_size*self.frame_num, 
+            self.batch_size, 
             self.n_channels, 
             self.feat_map_size, 
             self.feat_map_size
@@ -88,17 +89,23 @@ class TestVideoTransformer(unittest.TestCase):
         output = self.video_self_transformer(
             batch_feat_map, 
             context=None, 
-            num_frames=self.frame_num, 
+            num_frames=1, 
             image_only_indicator=torch.Tensor([True])
         )
         self.assertEqual(output.shape, (
-            self.batch_size*self.frame_num, 
+            self.batch_size, 
             self.n_channels, 
             self.feat_map_size, 
             self.feat_map_size
         ))
 
         # image_only_indicator is False
+        batch_feat_map = torch.randn([
+            self.batch_size*self.frame_num, 
+            self.n_channels, 
+            self.feat_map_size, 
+            self.feat_map_size
+        ])
         output = self.video_self_transformer(
             batch_feat_map, 
             context=None, 
@@ -113,8 +120,9 @@ class TestVideoTransformer(unittest.TestCase):
         ))
 
     def testVideoCrossTransformer_output_shape(self):
+        # image_only_indicator is True
         batch_feat_map = torch.randn([
-            self.batch_size*self.frame_num, 
+            self.batch_size, 
             self.n_channels, 
             self.feat_map_size, 
             self.feat_map_size
@@ -123,17 +131,23 @@ class TestVideoTransformer(unittest.TestCase):
         output = self.video_cross_transformer(
             batch_feat_map, 
             context=context, 
-            num_frames=self.frame_num, 
+            num_frames=1, 
             image_only_indicator=torch.Tensor([True])
         )
         self.assertEqual(output.shape, (
-            self.batch_size*self.frame_num, 
+            self.batch_size, 
             self.n_channels, 
             self.feat_map_size, 
             self.feat_map_size
         ))
 
         # image_only_indicator is False
+        batch_feat_map = torch.randn([
+            self.batch_size*self.frame_num, 
+            self.n_channels, 
+            self.feat_map_size, 
+            self.feat_map_size
+        ])
         output = self.video_cross_transformer(
             batch_feat_map, 
             context=context,

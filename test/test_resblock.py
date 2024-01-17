@@ -84,13 +84,15 @@ class TestVideoResBlock(unittest.TestCase):
         feat_map_size = 16
         frame_num = 8
 
-        batch_feat_map = torch.randn([self.batch_size * frame_num, self.in_channels, feat_map_size, feat_map_size])
-        timesteps = self.positional_emb(torch.randint(low=1, high=1000, size=(self.batch_size * frame_num, 1)))
-        self.assertEqual(timesteps.shape, (self.batch_size * frame_num, self.pos_channels))
+        # image_only_indicator is True
+        batch_feat_map = torch.randn([self.batch_size, self.in_channels, feat_map_size, feat_map_size])
+        timesteps = self.positional_emb(torch.randint(low=1, high=1000, size=(self.batch_size, 1)))
+        output = self.video_resblock(batch_feat_map, timesteps, 1, image_only_indicator=torch.Tensor([True]))
+        self.assertEqual(output.shape, (self.batch_size, self.out_channels, feat_map_size, feat_map_size))
 
-        output = self.video_resblock(batch_feat_map, timesteps, frame_num, image_only_indicator=torch.Tensor([True]))
-        self.assertEqual(output.shape, (self.batch_size * frame_num, self.out_channels, feat_map_size, feat_map_size))
-
+        # image_only_indicator is False
+        batch_feat_map = torch.randn([self.batch_size*frame_num, self.in_channels, feat_map_size, feat_map_size])
+        timesteps = self.positional_emb(torch.randint(low=1, high=1000, size=(self.batch_size*frame_num, 1)))
         output = self.video_resblock(batch_feat_map, timesteps, frame_num, image_only_indicator=torch.Tensor([False]))
         self.assertEqual(output.shape, (self.batch_size * frame_num, self.out_channels, feat_map_size, feat_map_size))
         
