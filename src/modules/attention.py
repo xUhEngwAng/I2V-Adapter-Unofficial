@@ -72,8 +72,6 @@ class BasicTransformerBlock(torch.nn.Module):
         self.norm2 = torch.nn.LayerNorm(query_dim)
 
     def forward(self, x, context=None):
-        # print(f'x shape: {x.shape}')
-        # print(f'context shape: {context.shape}')
         x = self.attn1(self.norm1(x)) + x
         x = self.attn2(self.norm2(x), context) + x
         return x
@@ -105,10 +103,12 @@ class VideoTransformer(BasicTransformerBlock):
     def forward(self, x, context, num_frames, image_only_indicator):
         x_in = x
         _, _, h, w = x_in.shape
-        # print(f'h={h}, w={w}, x shape: {x.shape}')
+
+        spatial_context = repeat(context, "b ... -> (b n) ...", n=num_frames) if context is not None else None
+        temporal_context = repeat(context, "b ... -> (b n) ...", n=h * w) if context is not None else None
         
         x = rearrange(x, "b c h w -> b (h w) c")
-        x_spatial = super().forward(x, context=context)
+        x_spatial = super().forward(x, context=spatial_context)
 
         # positional embedding for each frame
         frames = torch.arange(1, 1+num_frames, device=x.device)
@@ -117,12 +117,9 @@ class VideoTransformer(BasicTransformerBlock):
         pos_emb = positional_emb(frames, self.n_channels)
         emb_out = self.frame_pos_embed(pos_emb)[:, None, :]
 
-        if context is not None:
-            context = repeat(context, "b ... -> (b n) ...", n=h*w // num_frames)
-
         x_temporal = x_spatial + emb_out
         x_temporal = rearrange(x_spatial, "(b t) s c -> (b s) t c", t=num_frames)
-        x_temporal = self.video_attn(x_temporal, context=context)
+        x_temporal = self.video_attn(x_temporal, context=temporal_context)
         x_temporal = rearrange(x_temporal, "(b s) t c -> (b t) s c", s=h*w)
 
         output = self.time_mixer(

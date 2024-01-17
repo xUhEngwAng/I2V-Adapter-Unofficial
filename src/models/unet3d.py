@@ -35,12 +35,16 @@ class DownBlock3D(torch.nn.Module):
         self.down_sampler = torch.nn.MaxPool2d(2)
 
     def forward(self, x, context, skips, timesteps, image_only_indicator):
+        frame_num = self.num_frames
+        if image_only_indicator:
+            frame_num = 1
+        
         for modules in self.layers:
             for module in modules:
                 if isinstance(module, VideoResBlock):
-                    x = module(x, timesteps, self.num_frames, image_only_indicator)
+                    x = module(x, timesteps, frame_num, image_only_indicator)
                 elif isinstance(module, VideoTransformer):
-                    x = module(x, context, self.num_frames, image_only_indicator)
+                    x = module(x, context, frame_num, image_only_indicator)
                 else:
                     raise NotImplementedError
 
@@ -78,6 +82,10 @@ class UpBlock3D(torch.nn.Module):
         self.up_sampler = torch.nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
 
     def forward(self, x, context, skips, timesteps, image_only_indicator):
+        frame_num = self.num_frames
+        if image_only_indicator:
+            frame_num = 1
+            
         x = self.up_sampler(x)
 
         for modules in self.layers:
@@ -85,9 +93,9 @@ class UpBlock3D(torch.nn.Module):
             
             for module in modules:
                 if isinstance(module, VideoResBlock):
-                    x = module(x, timesteps, self.num_frames, image_only_indicator)
+                    x = module(x, timesteps, frame_num, image_only_indicator)
                 elif isinstance(module, VideoTransformer):
-                    x = module(x, context, self.num_frames, image_only_indicator)
+                    x = module(x, context, frame_num, image_only_indicator)
                 else:
                     raise NotImplementedError
         
@@ -116,7 +124,7 @@ class UNet3D(torch.nn.Module):
         self.pos_channels = pos_channels
         self.max_period = max_period
         self.num_frames = num_frames
-        self.inc = conv_nd(2, input_channels, 128, kernel_size=3, padding=1)
+        self.inc = torch.nn.Conv2d(input_channels, 128, kernel_size=3, padding=1)
 
         down_layers = []
         bottleneck_layers = []
@@ -172,11 +180,15 @@ class UNet3D(torch.nn.Module):
         for downblock in self.down_layers:
             x = downblock(x, context, skips, timesteps, image_only_indicator)
 
+        frame_num = self.num_frames
+        if image_only_indicator:
+            frame_num = 1
+
         for layer in self.bottleneck_layers:
             if isinstance(layer, VideoResBlock):
-                x = layer(x, timesteps, self.num_frames, image_only_indicator)
+                x = layer(x, timesteps, frame_num, image_only_indicator)
             elif isinstance(layer, VideoTransformer):
-                x = layer(x, context, self.num_frames, image_only_indicator)
+                x = layer(x, context, frame_num, image_only_indicator)
             else:
                 raise NotImplementedError
 
