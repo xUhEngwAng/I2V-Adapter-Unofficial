@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 latent_size = 16
 input_channels = 4
 output_channels = 4
-model_channels = 256
-channels_mults = [1, 2, 2]
-attention_levels = [1, 1, 1]
+model_channels = 128
+channels_mults = [1, 2, 4]
+attention_levels = [0, 1, 1]
 block_depth = 3
 n_noise_steps = 1000
 

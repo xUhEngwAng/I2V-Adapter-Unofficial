@@ -24,11 +24,13 @@ class VideoDataset(Dataset):
     ):
         super().__init__()
 
-        self.video_paths = sorted([str(p) for ext in video_exts for p in Path(root_dir).glob(f'**/*.{ext}')])[:10000]
-        self.prompts_paths = sorted([str(p) for ext in prompt_exts for p in Path(root_dir).glob(f'**/*.{ext}')])[:10000]
+        self.video_paths = sorted([str(p) for ext in video_exts for p in Path(root_dir).glob(f'**/*.{ext}')])
+        self.prompts_paths = sorted([str(p) for ext in prompt_exts for p in Path(root_dir).glob(f'**/*.{ext}')])
         self.max_frames = max_frames
 
         assert len(self.video_paths) == len(self.prompts_paths), f'# videos and their corresponding prompts should match, but found {len(self.video_paths)} and {len(self.prompts_paths)} respectively.'
+
+        print(f'{len(self.video_paths)} videos found under {root_dir}.')
         
         self.transform = torchvision.transforms.Compose([
             torchvision.transforms.ToTensor(),

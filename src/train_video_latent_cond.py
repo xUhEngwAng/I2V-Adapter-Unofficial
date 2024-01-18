@@ -5,6 +5,7 @@ import sys
 import time
 import torch
 
+from accelerate import Accelerator
 from einops import rearrange
 from random import randint, random
 from torch.utils.data import DataLoader
@@ -26,11 +27,14 @@ latent_size = 16
 input_channels = 4
 output_channels = 4
 model_channels = 128
-channels_mults = [1, 2, 2]
-attention_levels = [1, 1, 1]
-block_depth = 2
+channels_mults = [1, 2, 4]
+attention_levels = [0, 1, 1]
+block_depth = 3
 n_noise_steps = 1000
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Accelerator initialization
+accelerator = Accelerator()
+device = accelerator.device
 
 def prepare_noise_scheduler():
     beta_start = 1e-4
@@ -145,10 +149,10 @@ def train(model, optimizer, dataloader, eval_prompts, args):
                 text_inputs = tokenizer(text=prompts, padding=True, truncation=True, max_length=text_encoder.config.max_position_embeddings, return_tensors="pt")
                 text_embeddings = text_encoder(text_inputs.input_ids.to(device), return_dict=False)[0]
                 
-            batch_data = batch['data'].to(device)
+            batch_data = batch['data']
             if not args.image_only:
                 batch_data = rearrange(batch_data, "b t c h w -> (b t) c h w")
-            # print(f'batch_data.shape = {batch_data.shape}')
+                
             # randomly sample a timestep for each image in the batch
             t = torch.randint(low=1, high=n_noise_steps, size=(len(batch_data), ), device=device)
             # perturb each image by noise step t
@@ -161,7 +165,7 @@ def train(model, optimizer, dataloader, eval_prompts, args):
     
             # backward pass
             optimizer.zero_grad()
-            batch_loss.backward()
+            accelerator.backward(batch_loss)
             optimizer.step()
 
         logger.info(f'[{epoch+1}|{args.n_epoch}] Training finished, time elapsed: {time.time()-start: .3f}s, total loss: {total_loss/batch_cnt: .3f}.')
@@ -193,7 +197,7 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint_epoch', type=int, default=50, help='save model ckpt every specified epoches')
     parser.add_argument('--checkpoint_path', type=str, default='./checkpoint/')
     parser.add_argument('--condition_path', type=str, default='./data/WebVid-10M-latent/prompts.txt')
-    parser.add_argument('--dataset_path', type=str, default='./data/WebVid-10M-latent/sampled_10000.npy')
+    parser.add_argument('--dataset_path', type=str, default='./data/WebVid-10M-latent/sampled_20000.npy')
     parser.add_argument('--frames_per_video_path', type=str, default='./data/WebVid-10M-latent/frames_per_video.npy')
     parser.add_argument('--image_only', action='store_true')
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -246,7 +250,7 @@ if __name__ == '__main__':
         device,
         num_frames=args.n_frames,
         context_channels=512
-    ).to(device)
+    )
     
     if not args.use_checkpoint is None:
         try:
@@ -257,6 +261,9 @@ if __name__ == '__main__':
             logger.warning(f'Failed to load model from checkpoint {args.use_checkpoint}. Train from scratch instead.')
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    model, optim, dataloader = accelerator.prepare(
+        model, optim, dataloader
+    )
 
     start = time.time()
     logger.info(f'Start training task {args.task_name} for {args.n_epoch} epoches, with batch size {args.batch_size}.')

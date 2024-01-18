@@ -42,8 +42,6 @@ class LatentImageDataset(Dataset):
                     prompts.append(line)
 
             assert len(prompts) == len(self.image_latents), '# image latents and corresponding prompts should match.'
-            self.prompts = prompts
-            
             logger.info(f'{len(self.prompts)} text prompts loaded from {caption_path}.')
 
     def get_prompts(self):
@@ -75,13 +73,16 @@ class LatentVideoDataset(Dataset):
         std_latent = 2*(1/0.18215)
         video_latents = torch.Tensor(np.load(latent_path))
         video_latents = video_latents.clamp(-std_latent, std_latent) / std_latent
-
         frames_per_video = np.load(frames_per_video_path)
         frames_per_video_acc = np.hstack((0, frames_per_video.cumsum()))
+
+        self.video_latents = [
+            video_latents[frames_per_video_acc[ind]: frames_per_video_acc[ind+1]]
+            for ind in range(len(frames_per_video)) 
+            if bucket_size * num_frames <= frames_per_video[ind]
+        ]
         
-        self.video_latents = video_latents
-        self.frames_per_video_acc = frames_per_video_acc
-        logger.info(f'{len(frames_per_video)} video samples loaded from {latent_path}.')
+        logger.info(f'{len(self.video_latents)} video samples loaded from {latent_path}, with {len(frames_per_video) - len(self.video_latents)} filtered.')
 
         self.prompts = None 
         if caption_path is not None:
@@ -92,7 +93,11 @@ class LatentVideoDataset(Dataset):
                     prompts.append(line)
 
             assert len(prompts) == len(frames_per_video), '# video latents and corresponding prompts should match.'
-            self.prompts = prompts
+            self.prompts = [
+                prompts[ind]
+                for ind in range(len(frames_per_video)) 
+                if bucket_size * num_frames <= frames_per_video[ind]
+            ]
             
             logger.info(f'{len(self.prompts)} text prompts loaded from {caption_path}.')
 
@@ -117,13 +122,10 @@ class LatentVideoDataset(Dataset):
         return self.prompts
 
     def __len__(self):
-        return len(self.frames_per_video_acc) - 1
+        return len(self.video_latents)
 
     def __getitem__(self, ind):
-        start_frame = self.frames_per_video_acc[ind]
-        end_frame = self.frames_per_video_acc[ind+1]
-        video_latent = self.video_latents[start_frame: end_frame]
-        
+        video_latent = self.video_latents[ind]
         ret = {'data': self.sample_frames(video_latent)}
         
         if self.prompts is not None:

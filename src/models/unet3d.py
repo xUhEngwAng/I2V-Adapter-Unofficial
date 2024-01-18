@@ -202,13 +202,22 @@ if __name__ == '__main__':
     model_channels = 128
     channel_mults = [1, 2, 4]
     widths = [model_channels * mult for mult in channel_mults]
-    attention_levels = [1, 1, 1]
+    attention_levels = [0, 1, 1]
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     in_channels = 4
     out_channels = 4
 
-    model = UNet3D(block_depth, widths, attention_levels, in_channels, out_channels, device).to(device)
+    model = UNet3D(
+        block_depth,
+        widths, 
+        attention_levels, 
+        in_channels, 
+        out_channels, 
+        device,
+        context_channels=512
+    ).to(device)
+    
     from torchinfo import summary
 
     num_frames = 8
@@ -218,5 +227,6 @@ if __name__ == '__main__':
     
     batch_images = torch.randn([batch_size*num_frames, in_channels, latent_size, latent_size]).to(device)
     t = torch.randint(low=1, high=n_noise_steps, size=(batch_size*num_frames, 1)).to(device)
-    image_only_indicator=torch.Tensor([False]).to(device)
-    summary(model, input_data=[batch_images, t, image_only_indicator])
+    context = torch.randn([batch_size, 77, 512]).to(device)
+    image_only_indicator=torch.Tensor([True]).to(device)
+    summary(model, input_data=[batch_images, t, image_only_indicator, context])

@@ -118,7 +118,7 @@ class VideoTransformer(BasicTransformerBlock):
         emb_out = self.frame_pos_embed(pos_emb)[:, None, :]
 
         x_temporal = x_spatial + emb_out
-        x_temporal = rearrange(x_spatial, "(b t) s c -> (b s) t c", t=num_frames)
+        x_temporal = rearrange(x_temporal, "(b t) s c -> (b s) t c", t=num_frames)
         x_temporal = self.video_attn(x_temporal, context=temporal_context)
         x_temporal = rearrange(x_temporal, "(b s) t c -> (b t) s c", s=h*w)
 
