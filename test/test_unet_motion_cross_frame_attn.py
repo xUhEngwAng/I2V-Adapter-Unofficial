@@ -2,6 +2,14 @@ import sys
 import torch
 import unittest
 
+from diffusers import (
+    MotionAdapter,
+    AnimateDiffPipeline,
+    DDIMScheduler,
+    UNet2DConditionModel,
+    UNetMotionModel
+)
+
 sys.path.append('./')
 
 from src.models.unet_motion_cross_frame_attn import CrossFrameAttnDownBlockMotion
@@ -107,7 +115,7 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
         sample = torch.randn((batch_size, self.in_channels, num_frames, height, width))
         timestep = torch.randint(low=1, high=1000, size=(batch_size, ))
         encoder_hidden_states = torch.randn((batch_size, seq_len, self.cross_attention_dim))
-        
+
         output = self.unet_model(
             sample=sample,
             timestep=timestep,
@@ -128,7 +136,7 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
         sample = torch.randn((batch_size, self.in_channels, num_frames, height, width))
         timestep = torch.randint(low=1, high=1000, size=(batch_size, ))
         encoder_hidden_states = torch.randn((batch_size, seq_len, self.cross_attention_dim))
-        
+
         output = self.unet_model(
             sample=sample,
             timestep=timestep,
@@ -139,5 +147,17 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
 
         self.assertEqual(output.shape, (batch_size, self.out_channels, num_frames, height, width))
 
+    def test_UNetMotionCrossFrameAttnModel_load_pretrained(self):
+        adapter = MotionAdapter.from_pretrained('./animatediff-motion-adapter-v1-5-2')
+        unet = UNet2DConditionModel.from_pretrained('./stable-diffusion-v1-5/unet')
+        unet_motion_cross_frame_attn_model = UNetMotionCrossFrameAttnModel.from_unet2d(unet, adapter)
+        unet_motion_cross_frame_attn_model.freeze_animatediff_params()
+
+        def count_parameters(model):
+            return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+        print(f'{count_parameters(unet_motion_cross_frame_attn_model)} parameters can be trained.')
+
 if __name__ == '__main__':
     unittest.main()
+

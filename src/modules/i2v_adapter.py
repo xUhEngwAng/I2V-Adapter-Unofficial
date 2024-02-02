@@ -84,6 +84,19 @@ class I2VAdapterTransformer2DModel(Transformer2DModel):
             for d in range(num_layers)
         ])
 
+    def from_transformer2d_model(self, transformer2d_model):
+        self.load_state_dict(transformer2d_model.state_dict(), strict=False)
+
+        # Initialise I2VAdapter from spatial attention weights
+        for i2v_transformer, basic_transformer in zip(
+            self.transformer_blocks,
+            transformer2d_model.transformer_blocks
+        ):
+            i2v_transformer.i2v_adapter.load_state_dict(basic_transformer.attn1.state_dict())
+            # zero initialize output linear layer
+            i2v_transformer.i2v_adapter.to_out[0].weight.data.zero_()
+            i2v_transformer.i2v_adapter.to_out[0].bias.data.zero_()
+
     def forward(
         self,
         hidden_states: torch.FloatTensor,
@@ -321,7 +334,7 @@ class I2VAdapterTransformerBlock(BasicTransformerBlock):
         )
 
     def forward(
-        self, 
+        self,
         hidden_states: torch.FloatTensor,
         enable_cross_frame_attn: bool = False,
         num_frames: Optional[int] = None,
@@ -379,11 +392,11 @@ class I2VAdapterTransformerBlock(BasicTransformerBlock):
         if enable_cross_frame_attn:
             if num_frames is None:
                 raise ValueError('`num_frames` must be provided when `enable_cross_frame_attn` is True.')
-            
+
             # extract the first frame of each video clip as the context for cross-attention
             if batch_size % num_frames != 0:
                 raise ValueError(f'Batch size {batch_size} must be divisible by number of frames {num_frames}.')
-            
+
             first_frame_hidden_states = norm_hidden_states[0:batch_size:num_frames]
             first_frame_hidden_states = einops.repeat(first_frame_hidden_states, 'b n d -> (b f) n d', f=num_frames)
 
@@ -466,3 +479,4 @@ class I2VAdapterTransformerBlock(BasicTransformerBlock):
             hidden_states = hidden_states.squeeze(1)
 
         return hidden_states
+

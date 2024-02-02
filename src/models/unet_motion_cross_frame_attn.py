@@ -890,7 +890,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         down_blocks = []
         for down_blocks_type in config["down_block_types"]:
             if "CrossAttn" in down_blocks_type:
-                down_blocks.append("CrossAttnDownBlockMotion")
+                down_blocks.append("CrossFrameAttnDownBlockMotion")
             else:
                 down_blocks.append("DownBlockMotion")
         config["down_block_types"] = down_blocks
@@ -898,7 +898,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         up_blocks = []
         for down_blocks_type in config["up_block_types"]:
             if "CrossAttn" in down_blocks_type:
-                up_blocks.append("CrossAttnUpBlockMotion")
+                up_blocks.append("CrossFrameAttnUpBlockMotion")
             else:
                 up_blocks.append("UpBlockMotion")
 
@@ -925,19 +925,34 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         for i, down_block in enumerate(unet.down_blocks):
             model.down_blocks[i].resnets.load_state_dict(down_block.resnets.state_dict())
             if hasattr(model.down_blocks[i], "attentions"):
-                model.down_blocks[i].attentions.load_state_dict(down_block.attentions.state_dict())
+                for i2v_attn, attn in zip(
+                    model.down_blocks[i].attentions,
+                    down_block.attentions
+                ):
+                    i2v_attn.from_transformer2d_model(attn)
+
             if model.down_blocks[i].downsamplers:
                 model.down_blocks[i].downsamplers.load_state_dict(down_block.downsamplers.state_dict())
 
         for i, up_block in enumerate(unet.up_blocks):
             model.up_blocks[i].resnets.load_state_dict(up_block.resnets.state_dict())
             if hasattr(model.up_blocks[i], "attentions"):
-                model.up_blocks[i].attentions.load_state_dict(up_block.attentions.state_dict())
+                for i2v_attn, attn in zip(
+                    model.up_blocks[i].attentions,
+                    up_block.attentions
+                ):
+                    i2v_attn.from_transformer2d_model(attn)
+
             if model.up_blocks[i].upsamplers:
                 model.up_blocks[i].upsamplers.load_state_dict(up_block.upsamplers.state_dict())
 
         model.mid_block.resnets.load_state_dict(unet.mid_block.resnets.state_dict())
-        model.mid_block.attentions.load_state_dict(unet.mid_block.attentions.state_dict())
+        if hasattr(model.mid_block, "attentions"):
+            for i2v_attn, attn in zip(
+                model.mid_block.attentions,
+                unet.mid_block.attentions
+            ):
+                i2v_attn.from_transformer2d_model(attn)
 
         if unet.conv_norm_out is not None:
             model.conv_norm_out.load_state_dict(unet.conv_norm_out.state_dict())
@@ -953,26 +968,37 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
 
         return model
 
-    def freeze_unet2d_params(self) -> None:
+    def freeze_animatediff_params(self) -> None:
         # Freeze everything
         for param in self.parameters():
             param.requires_grad = False
 
-        # Unfreeze Motion Modules
+        def unfreeze_i2v_adapter(i2v_adapter):
+            for p in i2v_adapter.to_q.parameters():
+                p.requires_grad = True
+
+            for p in i2v_adapter.to_out.parameters():
+                p.requires_grad = True
+
+        # Unfreeze I2V-Adapter Modules
         for down_block in self.down_blocks:
-            motion_modules = down_block.motion_modules
-            for param in motion_modules.parameters():
-                param.requires_grad = True
+            if not hasattr(down_block, "attentions"):
+                continue
+            for attn in down_block.attentions:
+                for i2v_transformer in attn.transformer_blocks:
+                    unfreeze_i2v_adapter(i2v_transformer.i2v_adapter)
 
         for up_block in self.up_blocks:
-            motion_modules = up_block.motion_modules
-            for param in motion_modules.parameters():
-                param.requires_grad = True
+            if not hasattr(up_block, "attentions"):
+                continue
+            for attn in up_block.attentions:
+                for i2v_transformer in attn.transformer_blocks:
+                    unfreeze_i2v_adapter(i2v_transformer.i2v_adapter)
 
-        if hasattr(self.mid_block, "motion_modules"):
-            motion_modules = self.mid_block.motion_modules
-            for param in motion_modules.parameters():
-                param.requires_grad = True
+        if hasattr(self.mid_block, "attentions") :
+            for attn in self.mid_block.attentions:
+                for i2v_transformer in attn.transformer_blocks:
+                    unfreeze_i2v_adapter(i2v_transformer.i2v_adapter)
 
     def load_motion_modules(self, motion_adapter: Optional[MotionAdapter]) -> None:
         for i, down_block in enumerate(motion_adapter.down_blocks):
@@ -1293,3 +1319,4 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             return (sample,)
 
         return UNet3DConditionOutput(sample=sample)
+
