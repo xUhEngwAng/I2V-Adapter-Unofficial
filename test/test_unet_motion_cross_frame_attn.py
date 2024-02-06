@@ -3,9 +3,9 @@ import torch
 import unittest
 
 from diffusers import (
-    MotionAdapter,
-    AnimateDiffPipeline,
-    DDIMScheduler,
+    MotionAdapter, 
+    AnimateDiffPipeline, 
+    DDIMScheduler, 
     UNet2DConditionModel,
     UNetMotionModel
 )
@@ -97,13 +97,14 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
         self.out_channels = 4
         self.block_out_channels = (320, 640, 1280, 1280)
         self.cross_attention_dim = 768
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         self.unet_model = UNetMotionCrossFrameAttnModel(
             in_channels=self.in_channels,
             out_channels=self.out_channels,
             block_out_channels=self.block_out_channels,
             cross_attention_dim=self.cross_attention_dim
-        )
+        ).to(self.device)
 
     def test_UNetMotionCrossFrameAttnModel_output_shape(self):
         batch_size = 16
@@ -112,10 +113,10 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
         num_frames = 8
         seq_len = 42
 
-        sample = torch.randn((batch_size, self.in_channels, num_frames, height, width))
-        timestep = torch.randint(low=1, high=1000, size=(batch_size, ))
-        encoder_hidden_states = torch.randn((batch_size, seq_len, self.cross_attention_dim))
-
+        sample = torch.randn((batch_size, num_frames, self.in_channels, height, width), device=self.device)
+        timestep = torch.randint(low=1, high=1000, size=(batch_size, ), device=self.device)
+        encoder_hidden_states = torch.randn((batch_size, seq_len, self.cross_attention_dim), device=self.device)
+        
         output = self.unet_model(
             sample=sample,
             timestep=timestep,
@@ -124,7 +125,7 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
             return_dict=False
         )[0]
 
-        self.assertEqual(output.shape, (batch_size, self.out_channels, num_frames, height, width))
+        self.assertEqual(output.shape, (batch_size, num_frames, self.out_channels, height, width))
 
     def test_UNetMotionCrossFrameAttnModel_no_cross_frame_output_shape(self):
         batch_size = 16
@@ -133,10 +134,10 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
         num_frames = 8
         seq_len = 42
 
-        sample = torch.randn((batch_size, self.in_channels, num_frames, height, width))
-        timestep = torch.randint(low=1, high=1000, size=(batch_size, ))
-        encoder_hidden_states = torch.randn((batch_size, seq_len, self.cross_attention_dim))
-
+        sample = torch.randn((batch_size, num_frames, self.in_channels, height, width), device=self.device)
+        timestep = torch.randint(low=1, high=1000, size=(batch_size, ), device=self.device)
+        encoder_hidden_states = torch.randn((batch_size, seq_len, self.cross_attention_dim), device=self.device)
+        
         output = self.unet_model(
             sample=sample,
             timestep=timestep,
@@ -145,7 +146,7 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
             return_dict=False
         )[0]
 
-        self.assertEqual(output.shape, (batch_size, self.out_channels, num_frames, height, width))
+        self.assertEqual(output.shape, (batch_size, num_frames, self.out_channels, height, width))
 
     def test_UNetMotionCrossFrameAttnModel_load_pretrained(self):
         adapter = MotionAdapter.from_pretrained('./animatediff-motion-adapter-v1-5-2')
@@ -160,4 +161,3 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

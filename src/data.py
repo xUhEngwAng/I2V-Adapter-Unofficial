@@ -1,9 +1,10 @@
+import os, csv, random
 import logging
 import numpy as np
 import torch
 import torchvision
-import random
 
+from decord import VideoReader
 from einops import rearrange
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
@@ -42,6 +43,8 @@ class LatentImageDataset(Dataset):
                     prompts.append(line)
 
             assert len(prompts) == len(self.image_latents), '# image latents and corresponding prompts should match.'
+            self.prompts = prompts
+            
             logger.info(f'{len(self.prompts)} text prompts loaded from {caption_path}.')
 
     def get_prompts(self):
@@ -55,6 +58,77 @@ class LatentImageDataset(Dataset):
         if self.prompts is not None:
             ret.update({'context': self.prompts[ind]})
         return ret
+
+# code adapter from 
+# https://github.com/guoyww/AnimateDiff/blob/main/animatediff/data/dataset.py
+class WebVid10M(Dataset):
+    def __init__(
+            self,
+            csv_path, 
+            video_folder,
+            sample_size=256, 
+            sample_stride=4, 
+            sample_n_frames=16,
+            is_image=False,
+        ):
+        print(f"loading annotations from {csv_path} ...")
+        with open(csv_path, 'r') as csvfile:
+            self.dataset = list(csv.DictReader(csvfile))
+        self.length = len(self.dataset)
+        print(f"data scale: {self.length}")
+
+        self.video_folder    = video_folder
+        self.sample_stride   = sample_stride
+        self.sample_n_frames = sample_n_frames
+        self.is_image        = is_image
+        
+        sample_size = tuple(sample_size) if not isinstance(sample_size, int) else (sample_size, sample_size)
+        self.pixel_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.RandomHorizontalFlip(),
+            torchvision.transforms.Resize(sample_size[0]),
+            torchvision.transforms.CenterCrop(sample_size),
+            torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
+        ])
+    
+    def get_batch(self, idx):
+        video_dict = self.dataset[idx]
+        videoid, name, page_dir = video_dict['videoid'], video_dict['name'], video_dict['page_dir']
+        
+        video_dir    = os.path.join(self.video_folder, page_dir, f"{videoid}.mp4")
+        video_reader = VideoReader(video_dir)
+        video_length = len(video_reader)
+        
+        if not self.is_image:
+            clip_length = min(video_length, (self.sample_n_frames - 1) * self.sample_stride + 1)
+            start_idx   = random.randint(0, video_length - clip_length)
+            batch_index = np.linspace(start_idx, start_idx + clip_length - 1, self.sample_n_frames, dtype=int)
+        else:
+            batch_index = [random.randint(0, video_length - 1)]
+
+        pixel_values = torch.from_numpy(video_reader.get_batch(batch_index).asnumpy()).permute(0, 3, 1, 2).contiguous()
+        pixel_values = pixel_values / 255.
+        del video_reader
+
+        if self.is_image:
+            pixel_values = pixel_values[0]
+        
+        return pixel_values, name
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        while True:
+            try:
+                pixel_values, name = self.get_batch(idx)
+                break
+
+            except Exception as e:
+                idx = random.randint(0, self.length-1)
+
+        pixel_values = self.pixel_transforms(pixel_values)
+        sample = dict(pixel_values=pixel_values, text=name)
+        return sample
 
 class LatentVideoDataset(Dataset):
     def __init__(
@@ -92,6 +166,7 @@ class LatentVideoDataset(Dataset):
                 for line in f.readlines():
                     prompts.append(line)
 
+            # prompts = prompts[:1000]
             assert len(prompts) == len(frames_per_video), '# video latents and corresponding prompts should match.'
             self.prompts = [
                 prompts[ind]
@@ -134,8 +209,27 @@ class LatentVideoDataset(Dataset):
         return ret
 
 if __name__ == '__main__':
+    '''
     latent_image_path = './data/landscape_and_portrait/16_16_latent_embeddings.npy'
     prompts_path = './data/landscape_and_portrait/captions.txt'
     latent_image_dataset = LatentImageDataset(latent_image_path, prompts_path)
     dataloader = DataLoader(latent_image_dataset, shuffle=True, batch_size=64)
     print(next(iter(dataloader)))
+    '''
+
+    root_dir = './data/WebVid-10M/data/videos'
+    condition_path = './data/WebVid-10M/results_2M_val.csv'
+
+    dataset = WebVid10M(
+        csv_path=condition_path,
+        video_folder=root_dir,
+        sample_size=256,
+        sample_stride=4, 
+        sample_n_frames=16,
+        is_image=False,
+    )
+    
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, num_workers=16,)
+
+    for idx, batch in enumerate(dataloader):
+        print(batch["pixel_values"].shape, len(batch["text"]))

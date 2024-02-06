@@ -926,7 +926,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             model.down_blocks[i].resnets.load_state_dict(down_block.resnets.state_dict())
             if hasattr(model.down_blocks[i], "attentions"):
                 for i2v_attn, attn in zip(
-                    model.down_blocks[i].attentions,
+                    model.down_blocks[i].attentions, 
                     down_block.attentions
                 ):
                     i2v_attn.from_transformer2d_model(attn)
@@ -938,7 +938,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             model.up_blocks[i].resnets.load_state_dict(up_block.resnets.state_dict())
             if hasattr(model.up_blocks[i], "attentions"):
                 for i2v_attn, attn in zip(
-                    model.up_blocks[i].attentions,
+                    model.up_blocks[i].attentions, 
                     up_block.attentions
                 ):
                     i2v_attn.from_transformer2d_model(attn)
@@ -946,10 +946,10 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             if model.up_blocks[i].upsamplers:
                 model.up_blocks[i].upsamplers.load_state_dict(up_block.upsamplers.state_dict())
 
-        model.mid_block.resnets.load_state_dict(unet.mid_block.resnets.state_dict())
+        model.mid_block.resnets.load_state_dict(unet.mid_block.resnets.state_dict())        
         if hasattr(model.mid_block, "attentions"):
             for i2v_attn, attn in zip(
-                model.mid_block.attentions,
+                model.mid_block.attentions, 
                 unet.mid_block.attentions
             ):
                 i2v_attn.from_transformer2d_model(attn)
@@ -987,7 +987,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             for attn in down_block.attentions:
                 for i2v_transformer in attn.transformer_blocks:
                     unfreeze_i2v_adapter(i2v_transformer.i2v_adapter)
-
+                    
         for up_block in self.up_blocks:
             if not hasattr(up_block, "attentions"):
                 continue
@@ -1201,7 +1201,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             timesteps = timesteps[None].to(sample.device)
 
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        num_frames = sample.shape[2]
+        num_frames = sample.shape[1]
         timesteps = timesteps.expand(sample.shape[0])
 
         t_emb = self.time_proj(timesteps)
@@ -1226,7 +1226,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         encoder_hidden_states = encoder_hidden_states.repeat_interleave(repeats=num_frames, dim=0)
 
         # 2. pre-process
-        sample = sample.permute(0, 2, 1, 3, 4).reshape((sample.shape[0] * num_frames, -1) + sample.shape[3:])
+        sample = sample.reshape((sample.shape[0] * num_frames, -1) + sample.shape[3:])
         sample = self.conv_in(sample)
 
         # 3. down
@@ -1312,11 +1312,10 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
 
         sample = self.conv_out(sample)
 
-        # reshape to (batch, channel, framerate, width, height)
-        sample = sample[None, :].reshape((-1, num_frames) + sample.shape[1:]).permute(0, 2, 1, 3, 4)
+        # reshape to (batch, framerate, channel, width, height)
+        sample = sample[None, :].reshape((-1, num_frames) + sample.shape[1:])
 
         if not return_dict:
             return (sample,)
 
         return UNet3DConditionOutput(sample=sample)
-
