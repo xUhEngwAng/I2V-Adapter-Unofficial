@@ -85,7 +85,7 @@ class WebVid10M(Dataset):
         sample_size = tuple(sample_size) if not isinstance(sample_size, int) else (sample_size, sample_size)
         self.pixel_transforms = torchvision.transforms.Compose([
             torchvision.transforms.RandomHorizontalFlip(),
-            torchvision.transforms.Resize(sample_size[0]),
+            torchvision.transforms.Resize(sample_size[0], antialias=True),
             torchvision.transforms.CenterCrop(sample_size),
             torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
         ])
