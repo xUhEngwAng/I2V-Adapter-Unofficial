@@ -20,7 +20,7 @@ from diffusers.models.unet_3d_condition import UNet3DConditionOutput
 from diffusers.models.unet_motion_model import MotionModules, MotionAdapter
 from diffusers.utils.torch_utils import apply_freeu
 
-from ..modules.i2v_adapter import I2VAdapterTransformer2DModel
+from ..modules.i2v_adapter import I2VAdapterModule, I2VAdapterTransformer2DModel
 
 def get_down_block(
     down_block_type: str,
@@ -727,6 +727,8 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         super().__init__()
 
         self.sample_size = sample_size
+        self.layers_per_block = layers_per_block
+        self.num_attention_heads = num_attention_heads
 
         # Check inputs
         if len(down_block_types) != len(up_block_types):
@@ -878,12 +880,13 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
     def from_unet2d(
         cls,
         unet: UNet2DConditionModel,
-        motion_adapter: Optional[MotionAdapter] = None,
+        motion_adapter: MotionAdapter,
+        i2v_adapter: Optional[I2VAdapterModule] = None,
         load_weights: bool = True,
     ):
-        has_motion_adapter = motion_adapter is not None
-
         # based on https://github.com/guoyww/AnimateDiff/blob/895f3220c06318ea0760131ec70408b466c49333/animatediff/models/unet.py#L459
+        has_i2v_adapter = i2v_adapter is not None
+        
         config = unet.config
         config["_class_name"] = cls.__name__
 
@@ -903,11 +906,9 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
                 up_blocks.append("UpBlockMotion")
 
         config["up_block_types"] = up_blocks
-
-        if has_motion_adapter:
-            config["motion_num_attention_heads"] = motion_adapter.config["motion_num_attention_heads"]
-            config["motion_max_seq_length"] = motion_adapter.config["motion_max_seq_length"]
-            config["use_motion_mid_block"] = motion_adapter.config["use_motion_mid_block"]
+        config["motion_num_attention_heads"] = motion_adapter.config["motion_num_attention_heads"]
+        config["motion_max_seq_length"] = motion_adapter.config["motion_max_seq_length"]
+        config["use_motion_mid_block"] = motion_adapter.config["use_motion_mid_block"]
 
         # Need this for backwards compatibility with UNet2DConditionModel checkpoints
         if not config.get("num_attention_heads"):
@@ -960,8 +961,11 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             model.conv_act.load_state_dict(unet.conv_act.state_dict())
         model.conv_out.load_state_dict(unet.conv_out.state_dict())
 
-        if has_motion_adapter:
-            model.load_motion_modules(motion_adapter)
+        # load animatediff motion adapter
+        model.load_motion_modules(motion_adapter)
+
+        if has_i2v_adapter:
+            model.load_i2v_adapter(i2v_adapter)
 
         # ensure that the Motion UNet is the same dtype as the UNet2DConditionModel
         model.to(unet.dtype)
@@ -1010,6 +1014,60 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         if hasattr(self.mid_block, "motion_modules"):
             self.mid_block.motion_modules.load_state_dict(motion_adapter.mid_block.motion_modules.state_dict())
 
+    def load_i2v_adapter(self, i2v_adapter: I2VAdapterModule):
+        self.down_blocks.load_state_dict(i2v_adapter.down_blocks.state_dict(), strict=False)
+        self.up_blocks.load_state_dict(i2v_adapter.up_blocks.state_dict(), strict=False)
+        self.mid_block.load_state_dict(i2v_adapter.mid_block.state_dict(), strict=False)
+    
+    def obtain_i2v_adapter_modules(self):
+        state_dict = self.state_dict()
+
+        # Extract all i2v-adapter modules
+        i2v_adapter_state_dict = {}
+        for k, v in state_dict.items():
+            if "i2v_adapter" in k:
+                i2v_adapter_state_dict[k] = v
+
+        i2v_adapter = I2VAdapterModule(
+            self.layers_per_block,
+            self.block_out_channels,
+            self.num_attention_heads,
+        )
+        i2v_adapter.load_state_dict(i2v_adapter_state_dict)
+        return i2v_adapter    
+        
+    def save_i2v_adapter_modules(
+        self,
+        save_directory: str,
+        is_main_process: bool = True,
+        safe_serialization: bool = True,
+        variant: Optional[str] = None,
+        push_to_hub: bool = False,
+        **kwargs,
+    ):
+        state_dict = self.state_dict()
+
+        # Extract all i2v-adapter modules
+        i2v_adapter_state_dict = {}
+        for k, v in state_dict.items():
+            if "i2v_adapter" in k:
+                i2v_adapter_state_dict[k] = v
+
+        i2v_adapter = I2VAdapterModule(
+            self.layers_per_block,
+            self.block_out_channels,
+            self.num_attention_heads,
+        )
+        i2v_adapter.load_state_dict(i2v_adapter_state_dict)
+        i2v_adapter.save_pretrained(
+            save_directory=save_directory,
+            is_main_process=is_main_process,
+            safe_serialization=safe_serialization,
+            variant=variant,
+            push_to_hub=push_to_hub,
+            **kwargs,
+        )
+    
     def save_motion_modules(
         self,
         save_directory: str,
@@ -1161,8 +1219,8 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         self,
         sample: torch.FloatTensor,
         timestep: Union[torch.Tensor, float, int],
-        enable_cross_frame_attn: bool = False,
-        encoder_hidden_states: bool = False,
+        enable_cross_frame_attn: bool,
+        encoder_hidden_states: torch.Tensor,
         timestep_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -1290,6 +1348,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
                     hidden_states=sample,
                     temb=emb,
                     res_hidden_states_tuple=res_samples,
+                    enable_cross_frame_attn=enable_cross_frame_attn,
                     encoder_hidden_states=encoder_hidden_states,
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,

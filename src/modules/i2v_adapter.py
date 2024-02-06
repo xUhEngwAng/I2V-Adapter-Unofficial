@@ -3,10 +3,94 @@ from typing import Any, Dict, Optional
 import einops
 import torch
 
-from diffusers.utils import USE_PEFT_BACKEND
+from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.attention import BasicTransformerBlock
 from diffusers.models.attention_processor import Attention
+from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.transformer_2d import Transformer2DModel, Transformer2DModelOutput
+from diffusers.utils import USE_PEFT_BACKEND
+
+'''
+down_blocks[].attentions[].transformer_blocks[].i2v_adapter
+'''
+
+def get_block(
+    out_channel,
+    block_depth,
+    num_attention_heads,
+    transformer_layers_per_block
+):
+    block = torch.nn.Module()
+    attn_blocks = []
+
+    for _ in range(block_depth):
+        attn_block = torch.nn.Module()
+        transformer_blocks = []
+            
+        for _ in range(transformer_layers_per_block):
+            transformer_block = torch.nn.Module()
+            i2v_adapter = Attention(
+                query_dim=out_channel,
+                heads=num_attention_heads,
+                dim_head=out_channel // num_attention_heads,
+                cross_attention_dim=out_channel,
+            )
+            setattr(transformer_block, 'i2v_adapter', i2v_adapter)
+            transformer_blocks.append(transformer_block)
+        
+        transformer_blocks = torch.nn.ModuleList(transformer_blocks)
+        setattr(attn_block, 'transformer_blocks', transformer_blocks)
+        attn_blocks.append(attn_block)
+
+    attn_blocks = torch.nn.ModuleList(attn_blocks)
+    setattr(block, 'attentions', attn_blocks)
+    return block
+
+class I2VAdapterModule(ModelMixin, ConfigMixin):
+    @register_to_config
+    def __init__(
+        self,
+        block_depth,
+        block_out_channels,
+        num_attention_heads,
+        transformer_layers_per_block: int = 1,
+        mid_block_depth: int = 1
+    ):
+        super().__init__()
+
+        self.down_blocks = torch.nn.ModuleList([
+            get_block(
+                out_channel,
+                block_depth,
+                num_attention_heads,
+                transformer_layers_per_block
+            )
+            for out_channel in block_out_channels[:-1]
+        ])
+
+        reversed_block_out_channels = list(reversed(block_out_channels[:-1]))
+        
+        up_blocks = torch.nn.ModuleList([
+            get_block(
+                out_channel,
+                block_depth+1,
+                num_attention_heads,
+                transformer_layers_per_block
+            )
+            for out_channel in reversed_block_out_channels
+        ])
+        # create a dummy first block to align with the structure of stable diffusion
+        self.up_blocks = torch.nn.ModuleList([torch.nn.Identity()]) + up_blocks
+
+        self.mid_block = get_block(
+            block_out_channels[-1],
+            mid_block_depth,
+            num_attention_heads,
+            transformer_layers_per_block
+        )
+
+    def forward(self):
+        pass
 
 class I2VAdapterTransformer2DModel(Transformer2DModel):
     def __init__(
@@ -89,7 +173,7 @@ class I2VAdapterTransformer2DModel(Transformer2DModel):
 
         # Initialise I2VAdapter from spatial attention weights
         for i2v_transformer, basic_transformer in zip(
-            self.transformer_blocks,
+            self.transformer_blocks, 
             transformer2d_model.transformer_blocks
         ):
             i2v_transformer.i2v_adapter.load_state_dict(basic_transformer.attn1.state_dict())
@@ -334,7 +418,7 @@ class I2VAdapterTransformerBlock(BasicTransformerBlock):
         )
 
     def forward(
-        self,
+        self, 
         hidden_states: torch.FloatTensor,
         enable_cross_frame_attn: bool = False,
         num_frames: Optional[int] = None,
@@ -392,11 +476,11 @@ class I2VAdapterTransformerBlock(BasicTransformerBlock):
         if enable_cross_frame_attn:
             if num_frames is None:
                 raise ValueError('`num_frames` must be provided when `enable_cross_frame_attn` is True.')
-
-            # extract the first frame of each video clip as the context for cross-attention
+            
             if batch_size % num_frames != 0:
                 raise ValueError(f'Batch size {batch_size} must be divisible by number of frames {num_frames}.')
-
+            
+            # extract the first frame of each video clip as the context for cross-attention
             first_frame_hidden_states = norm_hidden_states[0:batch_size:num_frames]
             first_frame_hidden_states = einops.repeat(first_frame_hidden_states, 'b n d -> (b f) n d', f=num_frames)
 
@@ -479,4 +563,3 @@ class I2VAdapterTransformerBlock(BasicTransformerBlock):
             hidden_states = hidden_states.squeeze(1)
 
         return hidden_states
-
