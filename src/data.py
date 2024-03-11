@@ -32,20 +32,20 @@ class LatentImageDataset(Dataset):
         image_latents = image_latents.clamp(-std_latent, std_latent) / std_latent
         self.image_latents = image_latents
         self.image_latents = rearrange(image_latents, 'b h w c -> b c h w')
-
+        
         logger.info(f'{len(self.image_latents)} image samples loaded from {latent_path}.')
 
-        self.prompts = None
+        self.prompts = None 
         if caption_path is not None:
             prompts = []
-
+            
             with open(caption_path, 'r') as f:
                 for line in f.readlines():
                     prompts.append(line)
 
             assert len(prompts) == len(self.image_latents), '# image latents and corresponding prompts should match.'
             self.prompts = prompts
-
+            
             logger.info(f'{len(self.prompts)} text prompts loaded from {caption_path}.')
 
     def get_prompts(self):
@@ -60,15 +60,15 @@ class LatentImageDataset(Dataset):
             ret.update({'context': self.prompts[ind]})
         return ret
 
-# code adapter from
+# code adapter from 
 # https://github.com/guoyww/AnimateDiff/blob/main/animatediff/data/dataset.py
 class WebVid10M(Dataset):
     def __init__(
             self,
-            csv_path,
+            csv_path, 
             video_folder,
-            sample_size=256,
-            sample_stride=4,
+            sample_size=256, 
+            sample_stride=4, 
             sample_n_frames=16,
             is_image=False,
         ):
@@ -82,7 +82,7 @@ class WebVid10M(Dataset):
         self.sample_stride   = sample_stride
         self.sample_n_frames = sample_n_frames
         self.is_image        = is_image
-
+        
         sample_size = tuple(sample_size) if not isinstance(sample_size, int) else (sample_size, sample_size)
         self.pixel_transforms = torchvision.transforms.Compose([
             torchvision.transforms.RandomHorizontalFlip(),
@@ -91,15 +91,15 @@ class WebVid10M(Dataset):
             torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
         ])
         self.clip_image_processor = CLIPImageProcessor()
-
+    
     def get_batch(self, idx):
         video_dict = self.dataset[idx]
         videoid, name, page_dir = video_dict['videoid'], video_dict['name'], video_dict['page_dir']
-
+        
         video_dir    = os.path.join(self.video_folder, page_dir, f"{videoid}.mp4")
         video_reader = VideoReader(video_dir)
         video_length = len(video_reader)
-
+        
         if not self.is_image:
             clip_length = min(video_length, (self.sample_n_frames - 1) * self.sample_stride + 1)
             start_idx   = random.randint(0, video_length - clip_length)
@@ -113,7 +113,7 @@ class WebVid10M(Dataset):
 
         if self.is_image:
             pixel_values = pixel_values[0]
-
+        
         return pixel_values, name
 
     def __len__(self):
@@ -128,22 +128,26 @@ class WebVid10M(Dataset):
             except Exception as e:
                 idx = random.randint(0, self.length-1)
 
-        clip_image = self.clip_image_processor(images=pixel_values[0], return_tensors="pt").pixel_values[0]
+        if not self.is_image:
+            clip_image = self.clip_image_processor(images=pixel_values[0], return_tensors="pt").pixel_values[0]
+        else:
+            clip_image = self.clip_image_processor(images=pixel_values, return_tensors="pt").pixel_values[0]
+            
         pixel_values = self.pixel_transforms(pixel_values)
         sample = dict(
             clip_image=clip_image,
-            pixel_values=pixel_values,
+            pixel_values=pixel_values, 
             text=name
         )
         return sample
 
 class LatentVideoDataset(Dataset):
     def __init__(
-        self,
-        latent_path,
-        frames_per_video_path,
-        caption_path,
-        bucket_size,
+        self, 
+        latent_path, 
+        frames_per_video_path, 
+        caption_path, 
+        bucket_size, 
         num_frames=8
     ):
         super().__init__()
@@ -159,16 +163,16 @@ class LatentVideoDataset(Dataset):
 
         self.video_latents = [
             video_latents[frames_per_video_acc[ind]: frames_per_video_acc[ind+1]]
-            for ind in range(len(frames_per_video))
+            for ind in range(len(frames_per_video)) 
             if bucket_size * num_frames <= frames_per_video[ind]
         ]
-
+        
         logger.info(f'{len(self.video_latents)} video samples loaded from {latent_path}, with {len(frames_per_video) - len(self.video_latents)} filtered.')
 
-        self.prompts = None
+        self.prompts = None 
         if caption_path is not None:
             prompts = []
-
+            
             with open(caption_path, 'r') as f:
                 for line in f.readlines():
                     prompts.append(line)
@@ -177,16 +181,16 @@ class LatentVideoDataset(Dataset):
             assert len(prompts) == len(frames_per_video), '# video latents and corresponding prompts should match.'
             self.prompts = [
                 prompts[ind]
-                for ind in range(len(frames_per_video))
+                for ind in range(len(frames_per_video)) 
                 if bucket_size * num_frames <= frames_per_video[ind]
             ]
-
+            
             logger.info(f'{len(self.prompts)} text prompts loaded from {caption_path}.')
 
     def sample_frames(self, frames):
         '''
         Sample frames to `num_frames` according to `bucket_size`.
-        Specifically, a random frame is sampled in every bucket, whereas
+        Specifically, a random frame is sampled in every bucket, whereas 
         the starting point is also random sampled.
         '''
         frame_cnt = len(frames)
@@ -197,7 +201,7 @@ class LatentVideoDataset(Dataset):
             sampled = random.randint(start, start+self.bucket_size-1)
             indices.append(sampled)
             start = start + self.bucket_size
-
+            
         return frames[indices]
 
     def get_prompts(self):
@@ -209,10 +213,10 @@ class LatentVideoDataset(Dataset):
     def __getitem__(self, ind):
         video_latent = self.video_latents[ind]
         ret = {'data': self.sample_frames(video_latent)}
-
+        
         if self.prompts is not None:
             ret.update({'context': self.prompts[ind]})
-
+            
         return ret
 
 if __name__ == '__main__':
@@ -231,13 +235,12 @@ if __name__ == '__main__':
         csv_path=condition_path,
         video_folder=root_dir,
         sample_size=256,
-        sample_stride=4,
+        sample_stride=4, 
         sample_n_frames=16,
         is_image=False,
     )
-
+    
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, num_workers=16,)
 
     for idx, batch in enumerate(dataloader):
         print(batch["pixel_values"].shape, len(batch["text"]))
-

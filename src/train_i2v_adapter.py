@@ -13,18 +13,20 @@ logger = logging.getLogger(__name__)
 sys.path.append('./')
 
 from diffusers import (
-    AutoencoderKL,
+    AutoencoderKL, 
     DDIMScheduler,
-    DDPMScheduler,
-    MotionAdapter,
+    DDPMScheduler, 
+    MotionAdapter, 
     UNet2DConditionModel
 )
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from diffusers.utils import export_to_gif
+from diffusers.utils.import_utils import is_xformers_available
 
 from PIL import Image
 from accelerate import Accelerator
 from einops import rearrange
+from packaging import version
 from pathlib import Path
 from torch.utils.data import DataLoader
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
@@ -57,7 +59,7 @@ def train_loop(
         total_loss = 0
         model.train()
         start = time.time()
-
+        
         for ind, batch in enumerate(dataloader):
             with accelerator.accumulate(model):
                 batch_cnt += 1
@@ -67,10 +69,10 @@ def train_loop(
                 # classifier-free guidance
                 prompts = batch['text']
                 rand_num = random.random()
-
+                
                 if rand_num < args.uncond_prob_t + args.uncond_prob_ti:
                     prompts = [''] * batch_size
-
+                    
                 with torch.no_grad():
                     # prepare text clip embedding
                     text_inputs = tokenizer(
@@ -87,29 +89,29 @@ def train_loop(
                        rand_num < args.uncond_prob_t + args.uncond_prob_i + args.uncond_prob_ti:
                         image_embeds = torch.zeros_like(image_embeds)
                         hidden_states[:, 0] = torch.zeros_like(hidden_states[:, 0])
-
+                    
                     added_cond_kwargs = {'image_embeds': image_embeds}
 
                 # randomly sample a timestep for each video in the batch
                 timesteps = torch.randint(low=1, high=noise_scheduler.config.num_train_timesteps, size=(batch_size, ), device=device)
-
+                
                 # perturb each video by noise step t except for the first frame
                 first_frames_latents = hidden_states[:, 0]
                 noises_sampled = torch.randn(hidden_states.shape, device=device)
                 noises_sampled[:, 0] = 0
                 hidden_states = noise_scheduler.add_noise(hidden_states, noises_sampled, timesteps)
                 hidden_states[:, 0] = first_frames_latents
-
+            
                 # noise predition through UNet
                 pred = model(
-                    hidden_states,
-                    timesteps,
+                    hidden_states, 
+                    timesteps, 
                     enable_cross_frame_attn=True,
                     encoder_hidden_states=text_embeddings,
                     added_cond_kwargs=added_cond_kwargs,
                     return_dict=False
                 )[0]
-
+                
                 # calculate loss without the first frame
                 first_frame_mask = torch.ones(noises_sampled.shape, device=device)
                 first_frame_mask[:, 0] = 0
@@ -118,7 +120,7 @@ def train_loop(
                 batch_loss = (batch_loss * first_frame_mask.float()).sum()
                 batch_loss = batch_loss / first_frame_mask.sum()
                 total_loss += batch_loss
-
+        
                 # backward pass
                 optimizer.zero_grad()
                 accelerator.backward(batch_loss)
@@ -137,21 +139,22 @@ def train_loop(
                 i2v_adapter_pipeline.load_motion_adapter(motion_adapter)
 
             eval_batch_size = len(args.eval_prompts)
-
+            
             output = i2v_adapter_pipeline(
-                prompt=args.eval_prompts[0],
-                condition_image=args.condition_images[0],
-                ip_adapter_image=args.condition_images[0],
+                prompt=args.eval_prompts[-1],
+                condition_image=args.condition_images[-1],
+                ip_adapter_image=args.condition_images[-1],
                 negative_prompt="bad quality, worse quality",
                 num_frames=args.n_frames,
                 guidance_scale=args.cfg_ratio,
                 num_inference_steps=25,
+                frame_similarity_sample_ratio=0.9,
             )
             sampled_videos = output.frames
             sample_save_dir = os.path.join(args.result_path, f'epoch_{epoch+1}')
             if not os.path.exists(sample_save_dir):
                 os.mkdir(sample_save_dir)
-
+            
             for ind, frames in enumerate(sampled_videos):
                 sample_save_path = os.path.join(sample_save_dir, f'sample_{ind}.gif')
                 export_to_gif(frames, sample_save_path)
@@ -165,7 +168,7 @@ def train_loop(
                 model_save_path = os.path.join(args.checkpoint_path, f'epoch_{epoch+1}')
                 accelerator.unwrap_model(model).save_i2v_adapter_modules(os.path.join(model_save_path, 'i2v_adapter'))
                 logger.info(f"I2V-Adapter Module saved to {os.path.join(model_save_path, 'i2v_adapter')}.")
-
+                
                 if args.update_motion_modules:
                     accelerator.unwrap_model(model).save_motion_modules(os.path.join(model_save_path, 'motion_modules'))
                     logger.info(f"Motion Modules saved to {os.path.join(model_save_path, 'motion_modules')}.")
@@ -198,10 +201,10 @@ if __name__ == '__main__':
     parser.add_argument('--use_checkpoint', type=str, default=None, help='checkpoint file to be loaded.')
 
     args = parser.parse_args()
-
+    
     if args.task_name is None:
         args.task_name = f'I2VAdapter_{random.randint(100000, 999999)}'
-
+        
     args.result_path = os.path.join(args.result_path, args.task_name)
     if not os.path.exists(args.result_path):
         os.mkdir(args.result_path)
@@ -214,11 +217,11 @@ if __name__ == '__main__':
     eval_data_dir = os.path.dirname(args.eval_data_path)
     eval_data_df = pd.read_csv(args.eval_data_path)
     condition_images = []
-
+    
     for image_path in eval_data_df['image_path']:
         abs_image_path = os.path.join(eval_data_dir, image_path)
         condition_images.append(Image.open(abs_image_path))
-
+    
     args.condition_images = condition_images
     args.eval_prompts = eval_data_df['name'].tolist()
 
@@ -227,11 +230,11 @@ if __name__ == '__main__':
         csv_path=args.condition_path,
         video_folder=args.dataset_path,
         sample_size=args.image_size,
-        sample_stride=args.bucket_size,
+        sample_stride=args.bucket_size, 
         sample_n_frames=args.n_frames,
         is_image=False,
     )
-    dataloader = DataLoader(video_dataset, batch_size=args.batch_size, num_workers=16,)
+    dataloader = DataLoader(video_dataset, batch_size=args.batch_size, num_workers=16,)    
 
     # load various adapters
     ip_adapter = torch.load('./IP-Adapter/models/ip-adapter_sd15.bin', map_location='cpu')
@@ -255,14 +258,14 @@ if __name__ == '__main__':
         if os.path.exists(motion_adapter_path):
             motion_adapter = MotionAdapter.from_pretrained(motion_adapter_path)
             logger.info(f'Successfully loaded MotionModule from {motion_adapter_path}.')
-
+            
     # load checkpoint from the corresponding path of `args.start_epoch`
     elif args.start_epoch != 0:
         checkpoint_path = os.path.join(args.checkpoint_path, f'epoch_{args.start_epoch}')
         if not os.path.exists(checkpoint_path):
             logger.warn(f'Fatal! Checkpoint path {checkpoint_path} for start epoch {args.start_epoch} doest not exist! Exiting...')
             exit(0)
-
+        
         i2v_adapter_path = os.path.join(checkpoint_path, 'i2v_adapter')
         if not os.path.exists(i2v_adapter_path):
             logger.warning(f'Fatal! Checkpoint path {i2v_adapter_path} for I2VAdapterModule doesnot exist! Training from scratch instead.')
@@ -276,12 +279,22 @@ if __name__ == '__main__':
             logger.info(f'Successfully loaded MotionModule from {motion_adapter_path}.')
 
     # load unet from pretrained animatediff model
-    model_path = './SG161222_Realistic_Vision_V5.1_noVAE/'
-    unet2d = UNet2DConditionModel.from_pretrained(os.path.join(model_path, 'unet'))
+    model_path = './sd-model-finetuned/'
+    unet2d = UNet2DConditionModel.from_pretrained(model_path, subfolder='unet')
     unet = UNetMotionCrossFrameAttnModel.from_unet2d(unet2d, motion_adapter, i2v_adapter)
     unet._load_ip_adapter_weights(ip_adapter)
     unet.freeze_unet_params(freeze_animatediff=not args.update_motion_modules)
 
+    if is_xformers_available():
+        import xformers
+
+        xformers_version = version.parse(xformers.__version__)
+        if xformers_version == version.parse("0.0.16"):
+            logger.warning(
+                "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
+            )
+        unet.enable_xformers_memory_efficient_attention()
+    
     n_trainable_params = sum(p.numel() for p in unet.parameters() if p.requires_grad) / 1e6
     logger.info(f'unet loaded from pretrained animatediff, with {n_trainable_params}M trainable parameters.')
 
@@ -327,7 +340,7 @@ if __name__ == '__main__':
     sample_save_dir = os.path.join(args.result_path, f'epoch_{args.start_epoch}')
     if not os.path.exists(sample_save_dir):
         os.mkdir(sample_save_dir)
-
+    
     for ind, frames in enumerate(sampled_videos):
         sample_save_path = os.path.join(sample_save_dir, f'sample_{ind}.gif')
         export_to_gif(frames, sample_save_path)
@@ -368,8 +381,8 @@ if __name__ == '__main__':
         model_save_path = os.path.join(args.checkpoint_path, f'epoch_{args.n_epoch+args.start_epoch}')
         accelerator.unwrap_model(unet).save_i2v_adapter_modules(os.path.join(model_save_path, 'i2v_adapter'))
         logger.info(f"I2V-Adapter Module saved to {os.path.join(model_save_path, 'i2v_adapter')}.")
-
+        
         if args.update_motion_modules:
             accelerator.unwrap_model(unet).save_motion_modules(os.path.join(model_save_path, 'motion_modules'))
             logger.info(f"Motion Modules saved to {os.path.join(model_save_path, 'motion_modules')}.")
-
+        
