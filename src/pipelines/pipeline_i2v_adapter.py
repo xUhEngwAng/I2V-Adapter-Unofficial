@@ -10,6 +10,7 @@ import torch
 from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
 from diffusers.loaders import IPAdapterMixin, LoraLoaderMixin, TextualInversionLoaderMixin
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
+from diffusers.models.embeddings import ImageProjection, MLPProjection, Resampler
 from diffusers.models.lora import adjust_lora_scale_text_encoder
 from diffusers.models.unet_motion_model import MotionAdapter
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -687,7 +688,7 @@ if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     motion_adapter = MotionAdapter.from_pretrained('./animatediff-motion-adapter-v1-5-2')
-    i2v_adapter = I2VAdapterModule.from_pretrained('./checkpoint/I2VAdapter-sample-5000/epoch_30')
+    i2v_adapter = I2VAdapterModule.from_pretrained('./checkpoint/I2VAdapter-sample-5000-cfg-v2/epoch_10')
 
     unet2d = UNet2DConditionModel.from_pretrained(os.path.join(model_path, 'unet'))
     text_encoder = CLIPTextModel.from_pretrained(os.path.join(model_path, 'text_encoder'))
@@ -718,21 +719,26 @@ if __name__ == '__main__':
         motion_adapter,
         i2v_adapter,
         scheduler,
-    ).to(device)
+    )
+    i2v_adapter_pipeline.load_ip_adapter('./IP-Adapter/', subfolder="models", weight_name="ip-adapter_sd15.bin")
+    i2v_adapter_pipeline.to(device)
 
     # enable memory savings
     i2v_adapter_pipeline.enable_vae_slicing()
     i2v_adapter_pipeline.enable_model_cpu_offload()
 
     output = i2v_adapter_pipeline(
-        prompt=eval_prompts[0],
-        condition_image=condition_images[0],
-        negative_prompt="bad quality, worse quality",
+        prompt=eval_prompts,
+        condition_image=condition_images,
+        ip_adapter_image=condition_images,
+        negative_prompt=["bad quality, worse quality"] * len(eval_prompts),
         num_frames=16,
         guidance_scale=7.5,
         num_inference_steps=25,
-        generator=torch.Generator(device=device).manual_seed(42),
+        # generator=torch.Generator(device=device).manual_seed(42),
     )
-    frames = output.frames[0]
-    export_to_gif(frames, "samples/two_cats.gif")
+    sampled_videos = output.frames
+
+    for ind, frames in enumerate(sampled_videos):
+        export_to_gif(frames, f'samples/{eval_prompts[ind]}.gif')
 

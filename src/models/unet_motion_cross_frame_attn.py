@@ -1,6 +1,7 @@
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import UNet2DConditionLoadersMixin
 from diffusers.models.attention_processor import (
@@ -9,6 +10,9 @@ from diffusers.models.attention_processor import (
     AttentionProcessor,
     AttnAddedKVProcessor,
     AttnProcessor,
+    AttnProcessor2_0,
+    IPAdapterAttnProcessor,
+    IPAdapterAttnProcessor2_0,
 )
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_utils import ModelMixin
@@ -1030,7 +1034,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
 
         i2v_adapter = I2VAdapterModule(
             self.layers_per_block,
-            self.block_out_channels,
+            self.config.block_out_channels,
             self.num_attention_heads,
         )
         i2v_adapter.load_state_dict(i2v_adapter_state_dict)
@@ -1055,7 +1059,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
 
         i2v_adapter = I2VAdapterModule(
             self.layers_per_block,
-            self.block_out_channels,
+            self.config.block_out_channels,
             self.num_attention_heads,
         )
         i2v_adapter.load_state_dict(i2v_adapter_state_dict)
@@ -1214,6 +1218,65 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             for k in freeu_keys:
                 if hasattr(upsample_block, k) or getattr(upsample_block, k, None) is not None:
                     setattr(upsample_block, k, None)
+
+    def _load_ip_adapter_weights(self, state_dict):
+        if "proj.weight" in state_dict["image_proj"]:
+            # IP-Adapter
+            num_image_text_embeds = 4
+        elif "proj.3.weight" in state_dict["image_proj"]:
+            # IP-Adapter Full Face
+            num_image_text_embeds = 257  # 256 CLIP tokens + 1 CLS token
+        else:
+            # IP-Adapter Plus
+            num_image_text_embeds = state_dict["image_proj"]["latents"].shape[1]
+
+        # Set encoder_hid_proj after loading ip_adapter weights,
+        # because `Resampler` also has `attn_processors`.
+        self.encoder_hid_proj = None
+
+        # set ip-adapter cross-attention processors & load state_dict
+        attn_procs = {}
+        key_id = 1
+        for name in self.attn_processors.keys():
+            cross_attention_dim = None if not name.endswith("attn2.processor") else self.config.cross_attention_dim
+            if name.startswith("mid_block"):
+                hidden_size = self.config.block_out_channels[-1]
+            elif name.startswith("up_blocks"):
+                block_id = int(name[len("up_blocks.")])
+                hidden_size = list(reversed(self.config.block_out_channels))[block_id]
+            elif name.startswith("down_blocks"):
+                block_id = int(name[len("down_blocks.")])
+                hidden_size = self.config.block_out_channels[block_id]
+            if cross_attention_dim is None or "motion_modules" in name:
+                attn_processor_class = (
+                    AttnProcessor2_0 if hasattr(F, "scaled_dot_product_attention") else AttnProcessor
+                )
+                attn_procs[name] = attn_processor_class()
+            else:
+                attn_processor_class = (
+                    IPAdapterAttnProcessor2_0 if hasattr(F, "scaled_dot_product_attention") else IPAdapterAttnProcessor
+                )
+                attn_procs[name] = attn_processor_class(
+                    hidden_size=hidden_size,
+                    cross_attention_dim=cross_attention_dim,
+                    scale=1.0,
+                    num_tokens=num_image_text_embeds,
+                ).to(dtype=self.dtype, device=self.device)
+
+                value_dict = {}
+                for k, w in attn_procs[name].state_dict().items():
+                    value_dict.update({f"{k}": state_dict["ip_adapter"][f"{key_id}.{k}"]})
+
+                attn_procs[name].load_state_dict(value_dict)
+                key_id += 2
+
+        self.set_attn_processor(attn_procs)
+
+        # convert IP-Adapter Image Projection layers to diffusers
+        image_projection = self._convert_ip_adapter_image_proj_to_diffusers(state_dict["image_proj"])
+
+        self.encoder_hid_proj = image_projection.to(device=self.device, dtype=self.dtype)
+        self.config.encoder_hid_dim_type = "ip_image_proj"
 
     def forward(
         self,
