@@ -886,8 +886,8 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
     ):
         # based on https://github.com/guoyww/AnimateDiff/blob/895f3220c06318ea0760131ec70408b466c49333/animatediff/models/unet.py#L459
         has_i2v_adapter = i2v_adapter is not None
-        
-        config = unet.config
+
+        config = unet.config.copy()
         config["_class_name"] = cls.__name__
 
         down_blocks = []
@@ -927,7 +927,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             model.down_blocks[i].resnets.load_state_dict(down_block.resnets.state_dict())
             if hasattr(model.down_blocks[i], "attentions"):
                 for i2v_attn, attn in zip(
-                    model.down_blocks[i].attentions, 
+                    model.down_blocks[i].attentions,
                     down_block.attentions
                 ):
                     i2v_attn.from_transformer2d_model(attn)
@@ -939,7 +939,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             model.up_blocks[i].resnets.load_state_dict(up_block.resnets.state_dict())
             if hasattr(model.up_blocks[i], "attentions"):
                 for i2v_attn, attn in zip(
-                    model.up_blocks[i].attentions, 
+                    model.up_blocks[i].attentions,
                     up_block.attentions
                 ):
                     i2v_attn.from_transformer2d_model(attn)
@@ -947,10 +947,10 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             if model.up_blocks[i].upsamplers:
                 model.up_blocks[i].upsamplers.load_state_dict(up_block.upsamplers.state_dict())
 
-        model.mid_block.resnets.load_state_dict(unet.mid_block.resnets.state_dict())        
+        model.mid_block.resnets.load_state_dict(unet.mid_block.resnets.state_dict())
         if hasattr(model.mid_block, "attentions"):
             for i2v_attn, attn in zip(
-                model.mid_block.attentions, 
+                model.mid_block.attentions,
                 unet.mid_block.attentions
             ):
                 i2v_attn.from_transformer2d_model(attn)
@@ -991,7 +991,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             for attn in down_block.attentions:
                 for i2v_transformer in attn.transformer_blocks:
                     unfreeze_i2v_adapter(i2v_transformer.i2v_adapter)
-                    
+
         for up_block in self.up_blocks:
             if not hasattr(up_block, "attentions"):
                 continue
@@ -1018,7 +1018,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         self.down_blocks.load_state_dict(i2v_adapter.down_blocks.state_dict(), strict=False)
         self.up_blocks.load_state_dict(i2v_adapter.up_blocks.state_dict(), strict=False)
         self.mid_block.load_state_dict(i2v_adapter.mid_block.state_dict(), strict=False)
-    
+
     def obtain_i2v_adapter_modules(self):
         state_dict = self.state_dict()
 
@@ -1034,8 +1034,8 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             self.num_attention_heads,
         )
         i2v_adapter.load_state_dict(i2v_adapter_state_dict)
-        return i2v_adapter    
-        
+        return i2v_adapter
+
     def save_i2v_adapter_modules(
         self,
         save_directory: str,
@@ -1067,7 +1067,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             push_to_hub=push_to_hub,
             **kwargs,
         )
-    
+
     def save_motion_modules(
         self,
         save_directory: str,
@@ -1378,3 +1378,4 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             return (sample,)
 
         return UNet3DConditionOutput(sample=sample)
+
