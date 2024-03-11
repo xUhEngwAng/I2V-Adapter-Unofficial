@@ -41,9 +41,9 @@ from diffusers.utils import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 from transformers import (
-    CLIPImageProcessor,
-    CLIPTextModel,
-    CLIPTokenizer,
+    CLIPImageProcessor, 
+    CLIPTextModel, 
+    CLIPTokenizer, 
     CLIPVisionModelWithProjection
 )
 
@@ -118,7 +118,7 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
     def load_motion_adapter(self, motion_adater):
         self.unet.load_motion_modules(motion_adater)
         self.motion_adapter = motion_adater
-
+        
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_slicing
     def enable_vae_slicing(self):
         r"""
@@ -260,18 +260,18 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
                     f" {negative_prompt_embeds.shape}."
                 )
 
-    # Copied from
+    # Copied from 
     # diffusers.pipelines.text_to_video_synthesis.pipeline_text_to_video_synth.TextToVideoSDPipeline.prepare_latents
     def prepare_latents(
-        self,
-        batch_size,
-        num_channels_latents,
-        num_frames,
-        height,
-        width,
-        dtype,
-        device,
-        generator,
+        self, 
+        batch_size, 
+        num_channels_latents, 
+        num_frames, 
+        height, 
+        width, 
+        dtype, 
+        device, 
+        generator, 
         latents=None
     ):
         shape = (
@@ -303,7 +303,7 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
         batch_size, num_frames, channels, height, width = latents.shape
         latents = latents.reshape(batch_size * num_frames, channels, height, width)
         image = self.vae.decode(latents).sample
-
+        
         video = (
             image[None, :]
             .reshape(
@@ -698,7 +698,7 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
 
         if has_condition_image:
             latents[:, 0] = condition_image_latents
-
+        
         if output_type == "latent":
             return I2VAdapterlineOutput(frames=latents)
 
@@ -721,6 +721,7 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint_epoch', type=int, default=0)
+    parser.add_argument('--eval_data_path', type=str, default='./data/WebVid-10M/I2VAdapter-eval.csv')
     parser.add_argument('--task_name', type=str)
     args = parser.parse_args()
 
@@ -730,7 +731,7 @@ if __name__ == '__main__':
 
     i2v_adapter = None
     motion_adapter = MotionAdapter.from_pretrained('./animatediff-motion-adapter-v1-5-2')
-
+    
     checkpoint_path = os.path.join('./checkpoint', args.task_name, f'epoch_{args.checkpoint_epoch}')
     i2v_adapter_path = os.path.join(checkpoint_path, 'i2v_adapter')
     if not os.path.exists(i2v_adapter_path):
@@ -756,15 +757,14 @@ if __name__ == '__main__':
     )
 
     # load evaluation prompts and condition images
-    eval_data_path = './data/WebVid-10M/eval.csv'
-    eval_data_dir = os.path.dirname(eval_data_path)
-    eval_data_df = pd.read_csv(eval_data_path)
+    eval_data_dir = os.path.dirname(args.eval_data_path)
+    eval_data_df = pd.read_csv(args.eval_data_path)
     condition_images = []
-
+    
     for image_path in eval_data_df['image_path']:
         abs_image_path = os.path.join(eval_data_dir, image_path)
         condition_images.append(PIL.Image.open(abs_image_path))
-
+    
     eval_prompts = eval_data_df['name'].tolist()
 
     # build I2VAdapter pipeline
@@ -807,4 +807,3 @@ if __name__ == '__main__':
         export_to_gif(frames, os.path.join(sample_save_dir, f'{eval_prompts[ind]}.gif'))
 
     logger.info(f'Finish sampling {len(eval_prompts)} instances, the results saved to {sample_save_dir}.')
-
