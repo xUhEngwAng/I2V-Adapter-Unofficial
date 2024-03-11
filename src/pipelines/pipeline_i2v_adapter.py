@@ -2,10 +2,18 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import PIL.Image
+import argparse
 import inspect
 import numpy as np
+import logging
 import os
+import pandas as pd
 import torch
+import torchvision
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.getLogger("PIL.TiffImagePlugin").setLevel(51)
+logger = logging.getLogger(__name__)
 
 from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
 from diffusers.loaders import IPAdapterMixin, LoraLoaderMixin, TextualInversionLoaderMixin
@@ -25,6 +33,7 @@ from diffusers.schedulers import (
 from diffusers.utils import (
     USE_PEFT_BACKEND,
     BaseOutput,
+    export_to_gif,
     logging,
     replace_example_docstring,
     scale_lora_layers,
@@ -100,6 +109,7 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
 
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+        self.gaussian_blur = torchvision.transforms.GaussianBlur(kernel_size=3)
 
     def load_i2v_adapter(self, i2v_adapter):
         self.unet.load_i2v_adapter(i2v_adapter)
@@ -512,6 +522,15 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
 
         return prompt_embeds, negative_prompt_embeds
 
+    def get_timesteps(self, num_inference_steps, strength, device):
+        # get the original timestep using init_timestep
+        init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
+
+        t_start = max(num_inference_steps - init_timestep, 0)
+        timesteps = self.scheduler.timesteps[t_start:]
+
+        return timesteps, num_inference_steps - t_start
+
     @torch.no_grad()
     def __call__(
         self,
@@ -536,12 +555,17 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
         callback_steps: Optional[int] = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         clip_skip: Optional[int] = None,
+        frame_similarity_sample_ratio: float = 1,
+        frame_similarity_blurred_strength: float = 0.6,
     ):
         has_condition_image = condition_image is not None
 
         # 0. Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
         width = width or self.unet.config.sample_size * self.vae_scale_factor
+
+        assert frame_similarity_sample_ratio > 0 and frame_similarity_sample_ratio <= 1, (
+            f'"frame_similarity_sample_ratio" for img2vid must in (0, 1]. But receive {frame_similarity_sample_ratio}.')
 
         num_videos_per_prompt = 1
 
@@ -600,7 +624,7 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
 
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.scheduler.timesteps
+        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, frame_similarity_sample_ratio, device)
 
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
@@ -615,6 +639,17 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
             generator,
             latents,
         )
+
+        if frame_similarity_sample_ratio <= 1:
+            blurred_condition_latents = self.gaussian_blur(condition_image_latents)
+            expanded_blurred_condition_latents = blurred_condition_latents.unsqueeze(dim=1).repeat(1, num_frames, 1, 1, 1)
+            expanded_condition_image_latents = condition_image_latents.unsqueeze(dim=1).repeat(1, num_frames, 1, 1, 1)
+
+            mask = (torch.rand(expanded_condition_image_latents.shape) < frame_similarity_blurred_strength).float().to(device)
+            latents_prior = mask * expanded_blurred_condition_latents + (1 - mask) * expanded_condition_image_latents
+
+            noise = torch.randn_like(latents_prior)
+            latents = self.scheduler.add_noise(latents_prior, noise, timesteps[0].repeat(batch_size))
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -680,15 +715,33 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
         return I2VAdapterlineOutput(frames=video)
 
 if __name__ == '__main__':
-    import os
-    import pandas as pd
-    from diffusers.utils import export_to_gif
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--checkpoint_epoch', type=int, default=0)
+    parser.add_argument('--task_name', type=str)
+    args = parser.parse_args()
 
-    model_path = './SG161222_Realistic_Vision_V5.1_noVAE/'
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.task_name is None:
+        logger.error(f'Checkpoint `task_name` must be specified.')
+        exit(-1)
 
+    i2v_adapter = None
     motion_adapter = MotionAdapter.from_pretrained('./animatediff-motion-adapter-v1-5-2')
-    i2v_adapter = I2VAdapterModule.from_pretrained('./checkpoint/I2VAdapter-sample-5000-cfg-v2/epoch_10')
+
+    checkpoint_path = os.path.join('./checkpoint', args.task_name, f'epoch_{args.checkpoint_epoch}')
+    i2v_adapter_path = os.path.join(checkpoint_path, 'i2v_adapter')
+    if not os.path.exists(i2v_adapter_path):
+        logger.warning(f'Fatal! Checkpoint path {i2v_adapter_path} for I2VAdapterModule doesnot exist!')
+    else:
+        i2v_adapter = I2VAdapterModule.from_pretrained(i2v_adapter_path)
+        logger.info(f'Successfully loaded I2VAdapterModule from {i2v_adapter_path}.')
+
+    motion_adapter_path = os.path.join(checkpoint_path, 'motion_modules')
+    if os.path.exists(motion_adapter_path):
+        motion_adapter = MotionAdapter.from_pretrained(motion_adapter_path)
+        logger.info(f'Successfully loaded MotionModule from {motion_adapter_path}.')
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_path = './SG161222_Realistic_Vision_V5.1_noVAE/'
 
     unet2d = UNet2DConditionModel.from_pretrained(os.path.join(model_path, 'unet'))
     text_encoder = CLIPTextModel.from_pretrained(os.path.join(model_path, 'text_encoder'))
@@ -731,14 +784,23 @@ if __name__ == '__main__':
         prompt=eval_prompts,
         condition_image=condition_images,
         ip_adapter_image=condition_images,
-        negative_prompt=["bad quality, worse quality"] * len(eval_prompts),
+        negative_prompt=["bad quality, worse quality"]*len(eval_prompts),
         num_frames=16,
         guidance_scale=7.5,
         num_inference_steps=25,
-        # generator=torch.Generator(device=device).manual_seed(42),
+        frame_similarity_sample_ratio=0.9,
     )
     sampled_videos = output.frames
 
+    sample_save_dir = os.path.join('./samples', args.task_name)
+    if not os.path.exists(sample_save_dir):
+        os.mkdir(sample_save_dir)
+    sample_save_dir = os.path.join(sample_save_dir, f'epoch_{args.checkpoint_epoch}')
+    if not os.path.exists(sample_save_dir):
+        os.mkdir(sample_save_dir)
+
     for ind, frames in enumerate(sampled_videos):
-        export_to_gif(frames, f'samples/{eval_prompts[ind]}.gif')
+        export_to_gif(frames, os.path.join(sample_save_dir, f'{eval_prompts[ind]}.gif'))
+
+    logger.info(f'Finish sampling {len(eval_prompts)} instances, the results saved to {sample_save_dir}.')
 
