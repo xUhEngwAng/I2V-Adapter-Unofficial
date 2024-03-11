@@ -55,11 +55,6 @@ This repository contains unofficial implementation of the paper [I2V-Adapter: A 
         <td><img src="./assets/I2VAdapter-samples/two cats sleeping in a swaddle.gif"></td>
         <td><img src="./assets/our_results/two cats sleeping in a swaddle.gif"></td>
     </tr>
-    <tr>
-        <td><img src="./assets/input_images/a huge hamburger in the city.jpeg"></td>
-        <td><img src="./assets/I2VAdapter-samples/a huge hamburger rotating.gif"></td>
-        <td><img src="./assets/our_results/a huge hamburger rotating.gif"></td>
-    </tr>
 </table>
 
 ## Release Plans
