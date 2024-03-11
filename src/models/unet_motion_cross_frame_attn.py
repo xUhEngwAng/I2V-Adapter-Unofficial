@@ -976,10 +976,27 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
 
         return model
 
-    def freeze_animatediff_params(self) -> None:
+    def freeze_unet_params(self, freeze_animatediff = True) -> None:
         # Freeze everything
         for param in self.parameters():
             param.requires_grad = False
+
+        if not freeze_animatediff:
+            # Unfreeze Motion Modules
+            for down_block in self.down_blocks:
+                motion_modules = down_block.motion_modules
+                for param in motion_modules.parameters():
+                    param.requires_grad = True
+
+            for up_block in self.up_blocks:
+                motion_modules = up_block.motion_modules
+                for param in motion_modules.parameters():
+                    param.requires_grad = True
+
+            if hasattr(self.mid_block, "motion_modules"):
+                motion_modules = self.mid_block.motion_modules
+                for param in motion_modules.parameters():
+                    param.requires_grad = True
 
         def unfreeze_i2v_adapter(i2v_adapter):
             for p in i2v_adapter.to_q.parameters():
@@ -1040,6 +1057,26 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         i2v_adapter.load_state_dict(i2v_adapter_state_dict)
         return i2v_adapter
 
+    def obtain_motion_modules(self):
+        state_dict = self.state_dict()
+
+        # Extract all motion modules
+        motion_state_dict = {}
+        for k, v in state_dict.items():
+            if "motion_modules" in k:
+                motion_state_dict[k] = v
+
+        motion_adapter = MotionAdapter(
+            block_out_channels=self.config["block_out_channels"],
+            motion_layers_per_block=self.config["layers_per_block"],
+            motion_norm_num_groups=self.config["norm_num_groups"],
+            motion_num_attention_heads=self.config["motion_num_attention_heads"],
+            motion_max_seq_length=self.config["motion_max_seq_length"],
+            use_motion_mid_block=self.config["use_motion_mid_block"],
+        )
+        motion_adapter.load_state_dict(motion_state_dict)
+        return motion_adapter
+
     def save_i2v_adapter_modules(
         self,
         save_directory: str,
@@ -1049,20 +1086,7 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         push_to_hub: bool = False,
         **kwargs,
     ):
-        state_dict = self.state_dict()
-
-        # Extract all i2v-adapter modules
-        i2v_adapter_state_dict = {}
-        for k, v in state_dict.items():
-            if "i2v_adapter" in k:
-                i2v_adapter_state_dict[k] = v
-
-        i2v_adapter = I2VAdapterModule(
-            self.layers_per_block,
-            self.config.block_out_channels,
-            self.num_attention_heads,
-        )
-        i2v_adapter.load_state_dict(i2v_adapter_state_dict)
+        i2v_adapter = self.obtain_i2v_adapter_modules()
         i2v_adapter.save_pretrained(
             save_directory=save_directory,
             is_main_process=is_main_process,
@@ -1081,24 +1105,8 @@ class UNetMotionCrossFrameAttnModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         push_to_hub: bool = False,
         **kwargs,
     ) -> None:
-        state_dict = self.state_dict()
-
-        # Extract all motion modules
-        motion_state_dict = {}
-        for k, v in state_dict.items():
-            if "motion_modules" in k:
-                motion_state_dict[k] = v
-
-        adapter = MotionAdapter(
-            block_out_channels=self.config["block_out_channels"],
-            motion_layers_per_block=self.config["layers_per_block"],
-            motion_norm_num_groups=self.config["norm_num_groups"],
-            motion_num_attention_heads=self.config["motion_num_attention_heads"],
-            motion_max_seq_length=self.config["motion_max_seq_length"],
-            use_motion_mid_block=self.config["use_motion_mid_block"],
-        )
-        adapter.load_state_dict(motion_state_dict)
-        adapter.save_pretrained(
+        motion_adapter = self.obtain_motion_modules()
+        motion_adapter.save_pretrained(
             save_directory=save_directory,
             is_main_process=is_main_process,
             safe_serialization=safe_serialization,

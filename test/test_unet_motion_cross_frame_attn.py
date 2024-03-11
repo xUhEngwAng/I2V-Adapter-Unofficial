@@ -3,9 +3,9 @@ import torch
 import unittest
 
 from diffusers import (
-    MotionAdapter, 
-    AnimateDiffPipeline, 
-    DDIMScheduler, 
+    MotionAdapter,
+    AnimateDiffPipeline,
+    DDIMScheduler,
     UNet2DConditionModel,
     UNetMotionModel
 )
@@ -116,7 +116,7 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
         sample = torch.randn((batch_size, num_frames, self.in_channels, height, width), device=self.device)
         timestep = torch.randint(low=1, high=1000, size=(batch_size, ), device=self.device)
         encoder_hidden_states = torch.randn((batch_size, seq_len, self.cross_attention_dim), device=self.device)
-        
+
         output = self.unet_model(
             sample=sample,
             timestep=timestep,
@@ -137,7 +137,7 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
         sample = torch.randn((batch_size, num_frames, self.in_channels, height, width), device=self.device)
         timestep = torch.randint(low=1, high=1000, size=(batch_size, ), device=self.device)
         encoder_hidden_states = torch.randn((batch_size, seq_len, self.cross_attention_dim), device=self.device)
-        
+
         output = self.unet_model(
             sample=sample,
             timestep=timestep,
@@ -152,7 +152,7 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
         adapter = MotionAdapter.from_pretrained('./animatediff-motion-adapter-v1-5-2')
         unet = UNet2DConditionModel.from_pretrained('./stable-diffusion-v1-5/unet')
         unet_motion_cross_frame_attn_model = UNetMotionCrossFrameAttnModel.from_unet2d(unet, adapter)
-        unet_motion_cross_frame_attn_model.freeze_animatediff_params()
+        unet_motion_cross_frame_attn_model.freeze_unet_params()
 
         def count_parameters(model):
             return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -161,3 +161,4 @@ class testUNetMotionCrossFrameAttnModel(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

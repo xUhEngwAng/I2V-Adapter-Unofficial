@@ -115,6 +115,10 @@ class I2VAdapterPipeline(DiffusionPipeline, TextualInversionLoaderMixin, IPAdapt
         self.unet.load_i2v_adapter(i2v_adapter)
         self.i2v_adapter = i2v_adapter
 
+    def load_motion_adapter(self, motion_adater):
+        self.unet.load_motion_modules(motion_adater)
+        self.motion_adapter = motion_adater
+
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_slicing
     def enable_vae_slicing(self):
         r"""
