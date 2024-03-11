@@ -18,7 +18,7 @@ This repository contains unofficial implementation of the paper [I2V-Adapter: A 
     <tr>
         <td><img src="./assets/input_images/great wall sunrise.jpeg"></td>
         <td><img src="./assets/I2VAdapter-samples/great wall sunrise.gif"></td>
-        <td><img src="./assets/out_results/great wall sunrise.gif"></td>
+        <td><img src="./assets/our_results/great wall sunrise.gif"></td>
     </tr>
     <tr>
         <td><img src="./assets/input_images/old man warms up himself by the bonfire.jpeg"></td>
