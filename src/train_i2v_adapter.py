@@ -12,10 +12,10 @@ logger = logging.getLogger(__name__)
 sys.path.append('./')
 
 from diffusers import (
-    AutoencoderKL, 
+    AutoencoderKL,
     DDIMScheduler,
-    DDPMScheduler, 
-    MotionAdapter, 
+    DDPMScheduler,
+    MotionAdapter,
     UNet2DConditionModel
 )
 from diffusers.optimization import get_cosine_schedule_with_warmup
@@ -38,13 +38,13 @@ device = accelerator.device
 
 def train_loop(
     i2v_adapter_pipeline,
-    model, 
-    text_encoder, 
-    tokenizer, 
+    model,
+    text_encoder,
+    tokenizer,
     vae,
     noise_scheduler,
-    optimizer, 
-    dataloader, 
+    optimizer,
+    dataloader,
     args
 ):
     loss_fn = torch.nn.MSELoss(reduction='none')
@@ -54,7 +54,7 @@ def train_loop(
         total_loss = 0
         model.train()
         start = time.time()
-        
+
         for ind, batch in enumerate(dataloader):
             batch_cnt += 1
 
@@ -63,10 +63,10 @@ def train_loop(
                 prompts = [''] * len(batch['pixel_values'])
             else:
                 prompts = batch['text']
-            
+
             batch_size = len(batch['pixel_values'])
             batch_data = rearrange(batch['pixel_values'], 'b f c h w -> (b f) c h w')
-                
+
             with torch.no_grad():
                 text_inputs = tokenizer(text=prompts, padding=True, truncation=True, max_length=text_encoder.config.max_position_embeddings, return_tensors="pt")
                 text_embeddings = text_encoder(text_inputs.input_ids.to(device), return_dict=False)[0]
@@ -75,30 +75,31 @@ def train_loop(
 
             # randomly sample a timestep for each video in the batch
             timesteps = torch.randint(low=1, high=noise_scheduler.config.num_train_timesteps, size=(batch_size, ), device=device)
-            
+
             # perturb each video by noise step t except for the first frame
+            first_frames_latents = hidden_states[:, 0]
             noises_sampled = torch.randn(hidden_states.shape, device=device)
-            noises_sampled[:, 0] = 0
             hidden_states = noise_scheduler.add_noise(hidden_states, noises_sampled, timesteps)
-            
+            hidden_states[:, 0] = first_frames_latents
+
             # noise predition through UNet
             pred = model(
-                hidden_states, 
-                timesteps, 
+                hidden_states,
+                timesteps,
                 enable_cross_frame_attn=True,
                 encoder_hidden_states=text_embeddings,
                 return_dict=False
              )[0]
-            
+
             # calculate loss without the first frame
-            non_first_frame_mask = torch.ones(noises_sampled.shape, device=device)
-            non_first_frame_mask[:, 0] = 0
+            first_frame_mask = torch.ones(noises_sampled.shape, device=device)
+            first_frame_mask[:, 0] = 0
 
             batch_loss = loss_fn(noises_sampled, pred)
-            batch_loss = (batch_loss * non_first_frame_mask.float()).sum()
-            batch_loss = batch_loss / non_first_frame_mask.sum()
+            batch_loss = (batch_loss * first_frame_mask.float()).sum()
+            batch_loss = batch_loss / first_frame_mask.sum()
             total_loss += batch_loss
-    
+
             # backward pass
             optimizer.zero_grad()
             accelerator.backward(batch_loss)
@@ -107,10 +108,10 @@ def train_loop(
         logger.info(f'[{epoch+1}|{args.n_epoch}] Training finished, time elapsed: {time.time()-start: .3f}s, total loss: {total_loss/batch_cnt: .3f}.')
 
         if (epoch+1) % args.sample_epoch == 0:
-            i2v_adapter = accelerator.unwrap_model(model).obtain_i2v_adapter_modules().eval()
-            i2v_adapter_pipeline.i2v_adapter = i2v_adapter
+            i2v_adapter = accelerator.unwrap_model(model).obtain_i2v_adapter_modules()
+            i2v_adapter_pipeline.load_i2v_adapter(i2v_adapter)
             eval_batch_size = len(args.eval_prompts)
-            
+
             output = i2v_adapter_pipeline(
                 prompt=args.eval_prompts[0],
                 condition_image=args.condition_images[0],
@@ -124,13 +125,13 @@ def train_loop(
             sample_save_dir = os.path.join(args.result_path, f'epoch_{epoch+1}')
             if not os.path.exists(sample_save_dir):
                 os.mkdir(sample_save_dir)
-            
+
             for ind, frames in enumerate(sampled_videos):
                 sample_save_path = os.path.join(sample_save_dir, f'sample_{ind}.gif')
                 export_to_gif(frames, sample_save_path)
 
         if (epoch+1) % args.checkpoint_epoch == 0:
-            model_save_path = os.path.join(args.checkpoint_path, f'epoch_{epoch+1}.pt')
+            model_save_path = os.path.join(args.checkpoint_path, f'epoch_{epoch+1}')
             accelerator.unwrap_model(model).save_i2v_adapter_modules(model_save_path)
             logger.info(f'I2V-Adapter Module saved to {model_save_path}.')
 
@@ -140,7 +141,7 @@ if __name__ == '__main__':
     parser.add_argument('--bucket_size', type=int, default=4)
     parser.add_argument('--eval_batch_size', type=int, default=16)
     parser.add_argument('--eval_data_path', type=str, default='./data/WebVid-10M/eval.csv')
-    parser.add_argument('--cfg_ratio', type=float, default=3.5, help='hyperparameter for classifier-free guidance')
+    parser.add_argument('--cfg_ratio', type=float, default=7.5, help='hyperparameter for classifier-free guidance')
     parser.add_argument('--checkpoint_epoch', type=int, default=50, help='save model ckpt every specified epoches')
     parser.add_argument('--checkpoint_path', type=str, default='./checkpoint/')
     parser.add_argument('--condition_path', type=str, default='./data/WebVid-10M/results_2M_val.csv')
@@ -157,10 +158,10 @@ if __name__ == '__main__':
     parser.add_argument('--use_checkpoint', type=str, default=None, help='checkpoint file to be loaded.')
 
     args = parser.parse_args()
-    
+
     if args.task_name is None:
         args.task_name = f'I2VAdapter_{randint(100000, 999999)}'
-        
+
     args.result_path = os.path.join(args.result_path, args.task_name)
     if not os.path.exists(args.result_path):
         os.mkdir(args.result_path)
@@ -173,11 +174,11 @@ if __name__ == '__main__':
     eval_data_dir = os.path.dirname(args.eval_data_path)
     eval_data_df = pd.read_csv(args.eval_data_path)
     condition_images = []
-    
+
     for image_path in eval_data_df['image_path']:
         abs_image_path = os.path.join(eval_data_dir, image_path)
         condition_images.append(Image.open(abs_image_path))
-    
+
     args.condition_images = condition_images
     args.eval_prompts = eval_data_df['name'].tolist()
 
@@ -186,15 +187,16 @@ if __name__ == '__main__':
         csv_path=args.condition_path,
         video_folder=args.dataset_path,
         sample_size=args.image_size,
-        sample_stride=args.bucket_size, 
+        sample_stride=args.bucket_size,
         sample_n_frames=args.n_frames,
         is_image=False,
     )
     dataloader = DataLoader(video_dataset, batch_size=args.batch_size, num_workers=16,)
 
     # initialize unet model from pretrained animatediff
+    model_path = './SG161222_Realistic_Vision_V5.1_noVAE/'
     motion_adapter = MotionAdapter.from_pretrained('./animatediff-motion-adapter-v1-5-2')
-    unet2d = UNet2DConditionModel.from_pretrained('./stable-diffusion-v1-5/unet')
+    unet2d = UNet2DConditionModel.from_pretrained(os.path.join(model_path, 'unet'))
     unet = UNetMotionCrossFrameAttnModel.from_unet2d(unet2d, motion_adapter)
     unet.freeze_animatediff_params()
 
@@ -208,22 +210,52 @@ if __name__ == '__main__':
     optim = torch.optim.AdamW(unet.parameters(), lr=args.lr)
 
     # prepare I2VAdapterPipeline for sampling
-    text_encoder = CLIPTextModel.from_pretrained('./stable-diffusion-v1-5/text_encoder').eval().to(device)
-    tokenizer = CLIPTokenizer.from_pretrained('./stable-diffusion-v1-5/tokenizer')
-    vae = AutoencoderKL.from_pretrained('./stable-diffusion-v1-5/vae').eval().to(device)
+    text_encoder = CLIPTextModel.from_pretrained(os.path.join(model_path, 'text_encoder')).eval().to(device)
+    tokenizer = CLIPTokenizer.from_pretrained(os.path.join(model_path, 'tokenizer'))
+    vae = AutoencoderKL.from_pretrained(os.path.join(model_path, 'vae')).eval().to(device)
     scheduler = DDIMScheduler.from_pretrained(
         './stable-diffusion-v1-5', subfolder='scheduler', clip_sample=False, timestep_spacing='linspace', steps_offset=1
     )
+    i2v_adapter = unet.obtain_i2v_adapter_modules().to(device)
     pipe = I2VAdapterPipeline(
         vae,
         text_encoder,
         tokenizer,
         unet2d,
         motion_adapter,
-        None,
+        i2v_adapter,
         scheduler,
     ).to(device)
-    
+
+    pipe.enable_vae_slicing()
+    pipe.enable_model_cpu_offload()
+
+    # sample pipeline
+    output = pipe(
+        prompt=args.eval_prompts[0],
+        condition_image=args.condition_images[0],
+        negative_prompt="bad quality, worse quality",
+        num_frames=args.n_frames,
+        guidance_scale=args.cfg_ratio,
+        num_inference_steps=25,
+        generator=torch.Generator(device=device).manual_seed(42),
+    )
+
+    sampled_videos = output.frames
+    sample_save_dir = os.path.join(args.result_path, 'epoch_0')
+    if not os.path.exists(sample_save_dir):
+        os.mkdir(sample_save_dir)
+
+    for ind, frames in enumerate(sampled_videos):
+        sample_save_path = os.path.join(sample_save_dir, f'sample_{ind}.gif')
+        export_to_gif(frames, sample_save_path)
+
+    # save I2VAdapterModule on first initialization
+    model_save_path = os.path.join(args.checkpoint_path, 'epoch_0')
+    accelerator.unwrap_model(unet).save_i2v_adapter_modules(model_save_path)
+    logger.info(f'Model saved to {model_save_path}.')
+
+    # prepare unet for training
     unet, optim, dataloader = accelerator.prepare(
         unet, optim, dataloader
     )
@@ -231,7 +263,7 @@ if __name__ == '__main__':
     # start training
     start = time.time()
     logger.info(f'Start training task {args.task_name} for {args.n_epoch} epoches, with batch size {args.batch_size}.')
-    
+
     train_loop(
         pipe, unet, text_encoder, tokenizer, vae, noise_scheduler, optim, dataloader, args
     )
@@ -239,7 +271,7 @@ if __name__ == '__main__':
     logger.info(f'Finish training task {args.task_name} after {args.n_epoch} epoches, time eplased: {time.time() - start: .3f}s.')
 
     # save final model checkpoint to local storage
-    model_save_path = os.path.join(args.checkpoint_path, f'epoch_{args.n_epoch}.pt')
-    accelerator.unwrap_model(model).save_i2v_adapter_modules(model_save_path)
+    model_save_path = os.path.join(args.checkpoint_path, f'epoch_{args.n_epoch}')
+    accelerator.unwrap_model(unet).save_i2v_adapter_modules(model_save_path)
     logger.info(f'Model saved to {model_save_path}.')
-    
+
