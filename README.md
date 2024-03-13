@@ -61,19 +61,70 @@ This repository contains unofficial implementation of the paper [I2V-Adapter: A 
 
 - [x] Release training script.
 - [x] Release inference script.
-- [ ] Release unofficial pretrained weights. 
+- [ ] Release unofficial pretrained weights.
+
+## Repository Setup
+
+### Prepare Environment
+
+You can setup the repository by running the following commands
+
+```
+git clone https://github.com/xUhEngwAng/I2V-Adapter-Unofficial.git
+cd I2V-Adapter-Unofficial
+
+conda create -n I2VAdapter
+pip install -r requirements.txt
+```
+
+### Download Base T2I Model
+
+```
+git lfs install
+git clone https://huggingface.co/SG161222/Realistic_Vision_V5.1_noVAE
+```
+
+### Download Pretrained AnimateDiff Motion Adapter
+
+```
+git clone https://huggingface.co/guoyww/animatediff-motion-adapter-v1-5-2
+```
+
+### Download Pretrained IP-Adapter
+
+```
+git clone https://huggingface.co/h94/IP-Adapter
+```
 
 ## Training
+
+Before training, you should first download the corresponding video dataset. Take the frequently-used [WebVid-10M](https://www.robots.ox.ac.uk/~vgg/research/frozen-in-time/) dataset for example. You can download the video files and the `.csv` annotations and place them under the `./data` directory. If you use custom dataset, the dataset class under `src/data.py` should also be modified.
+
+To train I2V-Adapter modules, run
 
 ```
 accelerate launch ./src/train_image_to_video.py --task_name your_task_name --num_train_epochs 10 --checkpoint_epoch 2
 ```
 
+You can also finetune the motion modules by passing in `--update_motion_modules`
+
+```
+accelerate launch ./src/train_image_to_video.py --task_name your_task_name --num_train_epochs 10 --checkpoint_epoch 2 --update_motion_modules
+```
+
+As mentioned in the original AnimateDiff and PIA paper, you can also first finetune the base T2I model by using the individual frames in the video dataset. This can be accomplished by running 
+
+```
+accelerate launch ./src/train_text_to_image.py 
+```
+
 ## Inference
+
+The condition images and text prompts are given via `./data/WebVid-25K/I2VAdapter-eval.csv`, you can freely alter this file and provide your own condition images and prompts. Then run the following commands:
 
 ```
 python src/pipeline/pipeline_i2v_adapter.py --task_name I2VAdapter-25K-finetune --checkpoint_epoch 25
 ```
 
 ## Acknowledgements
-This codebase is based on [diffusers]() library and [AnimateDiff](). The implementation of first frame similarity prior is inspied by [PIA](). We thank all the contributors of these repositories. Additionally, we would like to thank the authors of I2VAdapter for their open research and foundational work, which inspired this unofficial implementation.
+This codebase is based on [diffusers](https://github.com/huggingface/diffusers) library and [AnimateDiff](https://github.com/guoyww/AnimateDiff). The implementation of first frame similarity prior is inspied by [PIA](https://github.com/open-mmlab/PIA). We thank all the contributors of these repositories. Additionally, we would like to thank the authors of I2VAdapter for their open research and foundational work, which inspired this unofficial implementation.
